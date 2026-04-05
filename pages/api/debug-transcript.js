@@ -5,135 +5,143 @@ export default async function handler(req) {
   const videoId = searchParams.get('v') || 'pEfrdAtAmqk'
   const results = {}
 
-  // Fetch YouTube page and deeply inspect the player response
-  try {
-    const res = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Cookie': 'CONSENT=YES+cb.20210328-17-p0.en+FX+999; SOCS=CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjMwODI5LjA3X3AxGgJlbiACGgYIgJnsBhAB',
-      },
-    })
-    const html = await res.text()
+  // Step 1: Fetch page, capture response cookies + session data
+  const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Cookie': 'CONSENT=YES+cb.20210328-17-p0.en+FX+999',
+    },
+  })
+  const html = await pageRes.text()
 
-    // Extract ytInitialPlayerResponse
-    const marker = 'var ytInitialPlayerResponse = '
-    const startIdx = html.indexOf(marker)
-    if (startIdx !== -1) {
-      let depth = 0
-      const jsonStart = startIdx + marker.length
-      for (let i = jsonStart; i < Math.min(jsonStart + 500000, html.length); i++) {
-        if (html[i] === '{') depth++
-        else if (html[i] === '}') {
-          depth--
-          if (depth === 0) {
-            try {
-              const pr = JSON.parse(html.slice(jsonStart, i + 1))
-              results.playerResponse = {
-                keys: Object.keys(pr),
-                playabilityStatus: pr.playabilityStatus?.status,
-                playabilityReason: pr.playabilityStatus?.reason?.slice(0, 150),
-                hasCaptions: !!pr.captions,
-                captionKeys: pr.captions ? Object.keys(pr.captions) : [],
-                captionTracksCount: pr.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length || 0,
-              }
-              // Look for captions in ANY nested object
-              const jsonStr = JSON.stringify(pr)
-              results.playerResponse.containsCaptionTracks = jsonStr.includes('captionTracks')
-              results.playerResponse.containsTimedtext = jsonStr.includes('timedtext')
-              results.playerResponse.containsBaseUrl = jsonStr.includes('baseUrl')
-              results.playerResponse.containsTranscript = jsonStr.includes('transcript')
-            } catch (e) {
-              results.playerResponse = { parseError: e.message }
-            }
-            break
-          }
-        }
-      }
-    } else {
-      results.playerResponse = 'not found in HTML'
-    }
+  // Capture all cookies from the page response
+  const setCookieHeaders = pageRes.headers.getSetCookie?.() || []
+  const responseCookies = setCookieHeaders.map(c => c.split(';')[0]).join('; ')
+  const fullCookieStr = 'CONSENT=YES+cb.20210328-17-p0.en+FX+999; ' + responseCookies
 
-    // Also check ytInitialData for transcript panel
-    const dataMarker = 'var ytInitialData = '
-    const dataIdx = html.indexOf(dataMarker)
-    if (dataIdx !== -1) {
-      let depth = 0
-      const jsonStart = dataIdx + dataMarker.length
-      for (let i = jsonStart; i < Math.min(jsonStart + 2000000, html.length); i++) {
-        if (html[i] === '{') depth++
-        else if (html[i] === '}') {
-          depth--
-          if (depth === 0) {
-            try {
-              const id = JSON.parse(html.slice(jsonStart, i + 1))
-              const idStr = JSON.stringify(id)
-              results.initialData = {
-                containsTranscript: idStr.includes('transcript'),
-                containsGetTranscript: idStr.includes('getTranscriptEndpoint'),
-                containsCaptions: idStr.includes('captions'),
-              }
-              // Extract getTranscriptEndpoint params if present
-              const paramMatch = idStr.match(/"getTranscriptEndpoint":\{"params":"([^"]+)"/)
-              if (paramMatch) {
-                results.initialData.transcriptParams = paramMatch[1].slice(0, 100)
-              }
-            } catch (e) {
-              results.initialData = { parseError: e.message }
-            }
-            break
-          }
-        }
-      }
-    }
-
-    // Check for caption-related strings anywhere in the page
-    results.htmlSearch = {
-      pageLength: html.length,
-      captionTracks: html.includes('"captionTracks"'),
-      timedtext: html.includes('timedtext'),
-      transcript: html.includes('transcript'),
-      getTranscriptEndpoint: html.includes('getTranscriptEndpoint'),
-      showTranscript: html.includes('Show transcript'),
-      playerCaptions: html.includes('playerCaptions'),
-    }
-  } catch (e) {
-    results.error = e.message
+  results.cookies = {
+    count: setCookieHeaders.length,
+    cookieStr: fullCookieStr.slice(0, 200),
   }
 
-  // Test get_transcript with params from the page (if found)
-  if (results.initialData?.transcriptParams) {
+  // Extract session data from HTML
+  const visitorMatch = html.match(/"VISITOR_DATA":"([^"]+)"/)
+  const visitorData = visitorMatch?.[1]
+  const apiKeyMatch = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/)
+  const apiKey = apiKeyMatch?.[1]
+  const sessionIdxMatch = html.match(/"LOGGED_IN_SESSION_INDEX":"?(\d+)"?/)
+  const datasyncIdMatch = html.match(/"DATASYNC_ID":"([^"]*)"/)
+
+  results.sessionData = {
+    hasVisitorData: !!visitorData,
+    visitorData: visitorData?.slice(0, 40),
+    apiKey,
+    hasSessionIdx: !!sessionIdxMatch,
+    hasDatasyncId: !!datasyncIdMatch,
+  }
+
+  // Extract transcript params from ytInitialData
+  const paramMatch = html.match(/"getTranscriptEndpoint":\{"params":"([^"]+)"/)
+  const transcriptParams = paramMatch?.[1]
+  results.hasTranscriptParams = !!transcriptParams
+
+  if (transcriptParams && visitorData) {
+    // Step 2: Call get_transcript with FULL session context
     try {
-      const res = await fetch('https://www.youtube.com/youtubei/v1/get_transcript', {
+      const url = 'https://www.youtube.com/youtubei/v1/get_transcript' + (apiKey ? '?key=' + apiKey : '')
+      const res = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Cookie': 'CONSENT=YES+cb.20210328-17-p0.en+FX+999; SOCS=CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjMwODI5LjA3X3AxGgJlbiACGgYIgJnsBhAB',
+          'Cookie': fullCookieStr,
+          'X-Youtube-Client-Name': '1',
+          'X-Youtube-Client-Version': '2.20240530.02.00',
+          'X-Goog-Visitor-Id': visitorData,
+          'Origin': 'https://www.youtube.com',
+          'Referer': `https://www.youtube.com/watch?v=${videoId}`,
         },
         body: JSON.stringify({
-          context: { client: { clientName: 'WEB', clientVersion: '2.20240530.02.00', hl: 'en', gl: 'US' } },
-          params: results.initialData.transcriptParams,
+          context: {
+            client: {
+              clientName: 'WEB',
+              clientVersion: '2.20240530.02.00',
+              hl: 'en',
+              gl: 'US',
+              visitorData,
+            },
+          },
+          params: transcriptParams,
         }),
       })
+
       const data = await res.json()
       const actions = data?.actions || []
       const panel = actions.find(a => a.updateEngagementPanelAction)
-      const cueGroups = panel?.updateEngagementPanelAction?.content?.transcriptRenderer?.body?.transcriptBodyRenderer?.cueGroups || []
-      results.getTranscript = {
+      const body = panel?.updateEngagementPanelAction?.content?.transcriptRenderer?.body?.transcriptBodyRenderer
+      const cueGroups = body?.cueGroups || []
+
+      results.getTranscriptWithSession = {
         httpStatus: res.status,
         hasError: !!data?.error,
         errorMsg: data?.error?.message?.slice(0, 100),
+        errorStatus: data?.error?.status,
         actionCount: actions.length,
         cueGroupCount: cueGroups.length,
       }
+
       if (cueGroups.length > 0) {
         const firstCue = cueGroups[0]?.transcriptCueGroupRenderer?.cues?.[0]?.transcriptCueRenderer
-        results.getTranscript.firstCueText = firstCue?.cue?.simpleText?.slice(0, 50)
+        results.getTranscriptWithSession.firstCueText = firstCue?.cue?.simpleText
+        results.getTranscriptWithSession.SUCCESS = true
+      }
+
+      if (data?.error) {
+        results.getTranscriptWithSession.fullError = JSON.stringify(data.error).slice(0, 300)
       }
     } catch (e) {
-      results.getTranscript = { error: e.message }
+      results.getTranscriptWithSession = { fetchError: e.message }
     }
+  }
+
+  // Also test: ANDROID player with the response cookies
+  try {
+    const res = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14)',
+        'Cookie': fullCookieStr,
+        ...(visitorData && { 'X-Goog-Visitor-Id': visitorData }),
+      },
+      body: JSON.stringify({
+        context: {
+          client: { clientName: 'ANDROID', clientVersion: '20.10.38' },
+          ...(visitorData && { client: { clientName: 'ANDROID', clientVersion: '20.10.38', visitorData } }),
+        },
+        videoId,
+      }),
+    })
+    const data = await res.json()
+    const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+    results.androidWithSessionCookies = {
+      status: data?.playabilityStatus?.status,
+      reason: data?.playabilityStatus?.reason?.slice(0, 100),
+      trackCount: tracks?.length || 0,
+    }
+    if (tracks?.length) {
+      results.androidWithSessionCookies.firstTrack = tracks[0].languageCode
+      // Try fetching caption
+      const capRes = await fetch(tracks[0].baseUrl, {
+        headers: { 'User-Agent': 'com.google.android.youtube/20.10.38 (Linux; U; Android 14)', 'Cookie': fullCookieStr },
+      })
+      const xml = await capRes.text()
+      results.androidWithSessionCookies.captionXmlLength = xml.length
+      if (xml.length > 100) results.androidWithSessionCookies.SUCCESS = true
+    }
+  } catch (e) {
+    results.androidWithSessionCookies = { error: e.message }
   }
 
   return new Response(JSON.stringify({ videoId, results }, null, 2), {
