@@ -18,7 +18,10 @@ function decodeHtml(str) {
     .replace(/<[^>]+>/g, '').replace(/\n/g, ' ').trim()
 }
 
-function parseXml(xml) {
+// ─── XML parsers ─────────────────────────────────────────────────────────────
+
+// Classic format: <text start="1.23" dur="4.56">caption text</text>
+function parseClassicXml(xml) {
   const lines = []
   const re = /<text start="([\d.]+)"[^>]*>([\s\S]*?)<\/text>/g
   let m
@@ -32,80 +35,112 @@ function parseXml(xml) {
   return lines
 }
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-
-const INNERTUBE_CONTEXT = {
-  client: {
-    clientName: 'WEB',
-    clientVersion: '2.20240530.02.00',
-    hl: 'en',
-    gl: 'US',
-  },
-}
-
-// ─── Strategy 1: InnerTube get_transcript endpoint ───────────────────────────
-// Returns transcript directly as JSON — no page scraping needed.
-
-function encodeTranscriptParams(videoId) {
-  const enc = new TextEncoder()
-  const videoIdBytes = enc.encode(videoId)
-  const inner = new Uint8Array([0x0A, videoIdBytes.length, ...videoIdBytes])
-  const outer = new Uint8Array([0x0A, inner.length, ...inner])
-  return Buffer.from(outer).toString('base64')
-}
-
-async function fetchViaGetTranscript(videoId) {
-  const params = encodeTranscriptParams(videoId)
-
-  const res = await fetch('https://www.youtube.com/youtubei/v1/get_transcript', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'User-Agent': UA,
-      'Accept-Language': 'en-US,en;q=0.9',
-    },
-    body: JSON.stringify({ context: INNERTUBE_CONTEXT, params }),
-  })
-
-  if (!res.ok) throw new Error(`get_transcript HTTP ${res.status}`)
-
-  const data = await res.json()
-  console.log('[transcript] get_transcript response keys:', Object.keys(data))
-
-  // Navigate the response to find transcript cues
-  const actions = data?.actions || []
-  const panel = actions.find(a => a.updateEngagementPanelAction)
-  const body = panel
-    ?.updateEngagementPanelAction?.content
-    ?.transcriptRenderer?.body
-    ?.transcriptBodyRenderer
-  const cueGroups = body?.cueGroups || []
-
-  if (cueGroups.length === 0) throw new Error('get_transcript returned no cues')
-
+// ANDROID format: <p t="1230" d="4560"><s>word</s><s t="200">word2</s></p>
+function parseAndroidXml(xml) {
   const lines = []
-  for (const group of cueGroups) {
-    const cue = group?.transcriptCueGroupRenderer?.cues?.[0]?.transcriptCueRenderer
-    if (!cue) continue
-    const text = (cue.cue?.simpleText || '').trim()
-    const startMs = parseInt(cue.startOffsetMs || '0', 10)
+  const pRe = /<p\s+t="(\d+)"\s+d="(\d+)"[^>]*>([\s\S]*?)<\/p>/g
+  let pm
+  while ((pm = pRe.exec(xml)) !== null) {
+    const startMs = parseInt(pm[1], 10)
+    const inner = pm[3]
+
+    // Extract text from <s> segments, or fallback to raw inner text
+    let text = ''
+    const sRe = /<s[^>]*>([^<]*)<\/s>/g
+    let sm
+    while ((sm = sRe.exec(inner)) !== null) text += sm[1]
+    if (!text) text = inner.replace(/<[^>]+>/g, '')
+    text = decodeHtml(text).trim()
+
     const sec = Math.floor(startMs / 1000)
     const mm = Math.floor(sec / 60).toString().padStart(2, '0')
     const ss = (sec % 60).toString().padStart(2, '0')
     if (text) lines.push(`[${mm}:${ss}] ${text}`)
   }
+  return lines
+}
 
-  if (lines.length === 0) throw new Error('get_transcript returned empty transcript')
-  console.log(`[transcript] get_transcript: ${lines.length} lines`)
+function parseXml(xml) {
+  // Try ANDROID format first (newer, returned by ANDROID client)
+  const androidLines = parseAndroidXml(xml)
+  if (androidLines.length > 0) return androidLines
+  // Fall back to classic format
+  return parseClassicXml(xml)
+}
+
+// ─── Fetch via ANDROID InnerTube client ──────────────────────────────────────
+// ANDROID client returns working caption URLs (WEB client URLs are often empty).
+
+const ANDROID_UA = 'com.google.android.youtube/20.10.38 (Linux; U; Android 14)'
+const ANDROID_CONTEXT = {
+  client: {
+    clientName: 'ANDROID',
+    clientVersion: '20.10.38',
+  },
+}
+
+async function fetchViaAndroidInnerTube(videoId) {
+  const playerRes = await fetch(
+    'https://www.youtube.com/youtubei/v1/player?prettyPrint=false',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': ANDROID_UA,
+      },
+      body: JSON.stringify({
+        context: ANDROID_CONTEXT,
+        videoId,
+      }),
+    }
+  )
+
+  if (!playerRes.ok) throw new Error(`ANDROID player HTTP ${playerRes.status}`)
+
+  const data = await playerRes.json()
+
+  // Check playability
+  const status = data?.playabilityStatus?.status
+  if (status && status !== 'OK') {
+    throw new Error(`Video not playable: ${status}`)
+  }
+
+  const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+  if (!tracks?.length) throw new Error('No caption tracks found')
+
+  const track =
+    tracks.find(t => t.languageCode === 'en' && t.kind !== 'asr') ||
+    tracks.find(t => t.languageCode === 'en') ||
+    tracks.find(t => t.languageCode?.startsWith('en')) ||
+    tracks[0]
+
+  console.log(`[transcript] using track: ${track.languageCode} (${track.kind || 'manual'})`)
+
+  const capRes = await fetch(track.baseUrl, {
+    headers: { 'User-Agent': ANDROID_UA },
+  })
+  if (!capRes.ok) throw new Error(`Caption fetch HTTP ${capRes.status}`)
+
+  const xml = await capRes.text()
+  if (!xml || xml.length < 50) throw new Error('Caption XML is empty')
+
+  console.log(`[transcript] XML length: ${xml.length}`)
+
+  const lines = parseXml(xml)
+  if (lines.length === 0) throw new Error('Parsed transcript is empty')
+
+  console.log(`[transcript] ✓ ${lines.length} lines via ANDROID InnerTube`)
   return lines.join('\n')
 }
 
-// ─── Strategy 2: Page scrape with consent cookie ─────────────────────────────
+// ─── Fallback: page scrape with consent cookie ──────────────────────────────
+
+const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
 async function fetchViaPageScrape(videoId) {
   const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
     headers: {
-      'User-Agent': UA,
+      'User-Agent': WEB_UA,
       'Accept-Language': 'en-US,en;q=0.9',
       'Cookie': 'CONSENT=PENDING+999',
     },
@@ -113,116 +148,54 @@ async function fetchViaPageScrape(videoId) {
   if (!pageRes.ok) throw new Error(`Page fetch HTTP ${pageRes.status}`)
 
   const html = await pageRes.text()
-  console.log('[transcript] page length:', html.length, 'has ytInitialPlayerResponse:', html.includes('ytInitialPlayerResponse'))
 
-  // Extract captionTracks from ytInitialPlayerResponse
-  const match = html.match(/"captionTracks":(\[.*?\])/)
-  if (!match) throw new Error('captionTracks not found in page HTML')
-
-  let tracks
-  try {
-    tracks = JSON.parse(match[1])
-  } catch {
-    throw new Error('Failed to parse captionTracks JSON')
+  if (html.includes('class="g-recaptcha"')) {
+    throw new Error('YouTube returned CAPTCHA')
   }
-  if (!tracks?.length) throw new Error('captionTracks array is empty')
 
-  const track =
-    tracks.find(t => t.languageCode === 'en' && !t.kind) ||
-    tracks.find(t => t.languageCode === 'en') ||
-    tracks.find(t => t.languageCode?.startsWith('en')) ||
-    tracks[0]
+  // Parse ytInitialPlayerResponse JSON with brace counting
+  const marker = 'var ytInitialPlayerResponse = '
+  const startIdx = html.indexOf(marker)
+  if (startIdx === -1) throw new Error('ytInitialPlayerResponse not found')
 
-  const captionRes = await fetch(track.baseUrl, {
-    headers: { 'User-Agent': UA, 'Referer': 'https://www.youtube.com/' },
-  })
-  const xml = await captionRes.text()
+  let depth = 0
+  const jsonStart = startIdx + marker.length
+  for (let i = jsonStart; i < html.length; i++) {
+    if (html[i] === '{') depth++
+    else if (html[i] === '}') {
+      depth--
+      if (depth === 0) {
+        try {
+          const playerData = JSON.parse(html.slice(jsonStart, i + 1))
+          const tracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+          if (!tracks?.length) throw new Error('No caption tracks in page data')
 
-  const lines = parseXml(xml)
-  if (lines.length === 0) throw new Error('XML parsing returned no lines')
-  console.log(`[transcript] page scrape: ${lines.length} lines`)
-  return lines.join('\n')
-}
+          const track =
+            tracks.find(t => t.languageCode === 'en' && t.kind !== 'asr') ||
+            tracks.find(t => t.languageCode === 'en') ||
+            tracks.find(t => t.languageCode?.startsWith('en')) ||
+            tracks[0]
 
-// ─── Strategy 3: InnerTube player API with public key ────────────────────────
+          // Fetch caption using ANDROID UA (WEB URLs often return empty)
+          const capRes = await fetch(track.baseUrl, {
+            headers: { 'User-Agent': ANDROID_UA },
+          })
+          const xml = await capRes.text()
+          if (!xml || xml.length < 50) throw new Error('Caption XML empty')
 
-async function fetchViaInnerTubePlayer(videoId) {
-  const playerRes = await fetch(
-    'https://www.youtube.com/youtubei/v1/player?key=AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8',
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': UA,
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-      body: JSON.stringify({ videoId, context: INNERTUBE_CONTEXT }),
+          const lines = parseXml(xml)
+          if (lines.length === 0) throw new Error('Parsed transcript empty')
+
+          console.log(`[transcript] ✓ ${lines.length} lines via page scrape`)
+          return lines.join('\n')
+        } catch (e) {
+          if (e.message.includes('lines via')) throw e // success path — re-throw to exit
+          throw new Error(`JSON parse failed: ${e.message}`)
+        }
+      }
     }
-  )
-  if (!playerRes.ok) throw new Error(`Player API HTTP ${playerRes.status}`)
-
-  const playerData = await playerRes.json()
-  const tracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks
-
-  if (!tracks?.length) throw new Error('Player API returned no caption tracks')
-
-  const track =
-    tracks.find(t => t.languageCode === 'en' && !t.kind) ||
-    tracks.find(t => t.languageCode === 'en') ||
-    tracks.find(t => t.languageCode?.startsWith('en')) ||
-    tracks[0]
-
-  const captionRes = await fetch(track.baseUrl, {
-    headers: { 'User-Agent': UA, 'Referer': 'https://www.youtube.com/' },
-  })
-  const xml = await captionRes.text()
-
-  const lines = parseXml(xml)
-  if (lines.length === 0) throw new Error('XML parsing returned no lines')
-  console.log(`[transcript] InnerTube player: ${lines.length} lines`)
-  return lines.join('\n')
-}
-
-// ─── Strategy 4: timedtext list API ──────────────────────────────────────────
-
-async function fetchViaTimedtext(videoId) {
-  const listRes = await fetch(
-    `https://www.youtube.com/api/timedtext?v=${videoId}&type=list`,
-    { headers: { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' } }
-  )
-  const listXml = await listRes.text()
-
-  const trackRe = /<track\b([^>]+)>/g
-  const found = []
-  let tm
-  while ((tm = trackRe.exec(listXml)) !== null) {
-    const attrs = tm[1]
-    const langCode = attrs.match(/lang_code="([^"]+)"/)?.[1]
-    const name = attrs.match(/\bname="([^"]*)"/)?.[1] ?? ''
-    if (langCode) found.push({ langCode, name })
   }
-
-  if (!found.length) throw new Error('Timedtext list returned no tracks')
-
-  const track =
-    found.find(t => t.langCode === 'en' && t.name === '') ||
-    found.find(t => t.langCode === 'en') ||
-    found.find(t => t.langCode?.startsWith('en')) ||
-    found[0]
-
-  const params = new URLSearchParams({ v: videoId, lang: track.langCode })
-  if (track.name) params.set('name', track.name)
-
-  const captionRes = await fetch(
-    `https://www.youtube.com/api/timedtext?${params}`,
-    { headers: { 'User-Agent': UA, 'Referer': 'https://www.youtube.com/' } }
-  )
-  const xml = await captionRes.text()
-
-  const lines = parseXml(xml)
-  if (lines.length === 0) throw new Error('Timedtext XML returned no lines')
-  console.log(`[transcript] timedtext: ${lines.length} lines`)
-  return lines.join('\n')
+  throw new Error('Could not parse ytInitialPlayerResponse')
 }
 
 // ─── Public entry point ──────────────────────────────────────────────────────
@@ -233,24 +206,19 @@ export async function getTranscriptWithFallback(videoId) {
 }
 
 export async function fetchTranscript(videoId) {
-  const strategies = [
-    { name: 'get_transcript', fn: () => fetchViaGetTranscript(videoId) },
-    { name: 'page_scrape',    fn: () => fetchViaPageScrape(videoId) },
-    { name: 'innertube',      fn: () => fetchViaInnerTubePlayer(videoId) },
-    { name: 'timedtext',      fn: () => fetchViaTimedtext(videoId) },
-  ]
-
-  const errors = []
-  for (const { name, fn } of strategies) {
-    try {
-      const result = await fn()
-      console.log(`[transcript] ✓ success via ${name}`)
-      return result
-    } catch (err) {
-      console.log(`[transcript] ✗ ${name} failed: ${err.message}`)
-      errors.push(`${name}: ${err.message}`)
-    }
+  // Strategy 1: ANDROID InnerTube client (most reliable from serverless)
+  try {
+    return await fetchViaAndroidInnerTube(videoId)
+  } catch (err) {
+    console.log(`[transcript] ANDROID InnerTube failed: ${err.message}`)
   }
 
-  throw new Error(`No transcript available for this video. [${errors.join(' | ')}]`)
+  // Strategy 2: Page scrape fallback
+  try {
+    return await fetchViaPageScrape(videoId)
+  } catch (err) {
+    console.log(`[transcript] Page scrape failed: ${err.message}`)
+  }
+
+  throw new Error('No transcript available for this video.')
 }
