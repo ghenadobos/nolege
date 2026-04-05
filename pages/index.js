@@ -305,10 +305,29 @@ export default function Home() {
     setTranscriptSource(null)
     setLoading(true)
     try {
+      // Step 1: Fetch transcript via Edge Runtime (bypasses datacenter IP blocks)
+      let transcript = null
+      let transcriptSource = null
+      try {
+        const vid = new URL(url).searchParams.get('v') || url.split('youtu.be/')[1]?.split(/[?#]/)[0]
+        if (vid) {
+          const tRes = await fetch(`/api/transcript?v=${encodeURIComponent(vid)}`)
+          const tData = await tRes.json()
+          if (tRes.ok && tData.transcript) {
+            transcript = tData.transcript
+            transcriptSource = tData.source
+          }
+        }
+      } catch {}
+
+      // Step 2: Send to summarize (with transcript if we got it)
       const res = await fetch('/api/summarize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, mode: 'study-pack', depth: 'full', language: lang }),
+        body: JSON.stringify({
+          url, mode: 'study-pack', depth: 'full', language: lang,
+          ...(transcript && { transcript, transcriptSource }),
+        }),
       })
       const text = await res.text()
       let data

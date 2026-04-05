@@ -41,20 +41,25 @@ export default async function handler(req, res) {
 
     let transcript
     let transcriptSource = 'captions'
-    try {
-      const result = await getTranscriptWithFallback(videoId)
-      transcript = result.transcript
-      transcriptSource = result.source
-    } catch (err) {
-      const msg = (err?.message || '').toLowerCase()
-      console.error('Transcript error:', err?.message)
-      if (msg.includes('download') || msg.includes('audio') || msg.includes('ffmpeg') || msg.includes('decipher')) {
-        return res.status(422).json({ error: `Could not download or transcribe audio: ${err?.message || 'unknown error'}` })
+
+    // Accept pre-fetched transcript from client (Edge Runtime path)
+    if (req.body.transcript && typeof req.body.transcript === 'string' && req.body.transcript.length > 50) {
+      transcript = req.body.transcript
+      transcriptSource = req.body.transcriptSource || 'edge'
+    } else {
+      // Fallback: try server-side fetch (works locally, may fail on Vercel)
+      try {
+        const result = await getTranscriptWithFallback(videoId)
+        transcript = result.transcript
+        transcriptSource = result.source
+      } catch (err) {
+        const msg = (err?.message || '').toLowerCase()
+        console.error('Transcript error:', err?.message)
+        if (msg.includes('no transcript') || msg.includes('empty') || msg.includes('could not get')) {
+          return res.status(422).json({ error: 'No captions available for this video.' })
+        }
+        return res.status(422).json({ error: `Failed to get transcript: ${err?.message || 'unknown error'}` })
       }
-      if (msg.includes('no transcript') || msg.includes('empty') || msg.includes('could not get')) {
-        return res.status(422).json({ error: 'No captions available and audio transcription also failed.' })
-      }
-      return res.status(422).json({ error: `Failed to get transcript: ${err?.message || 'unknown error'}` })
     }
 
     const charLimits = { quick: 20000, standard: 50000, full: 100000 }
