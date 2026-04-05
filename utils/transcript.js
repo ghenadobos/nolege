@@ -61,28 +61,33 @@ export async function getTranscriptWithFallback(videoId) {
 export async function fetchTranscript(videoId) {
   const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
-  // Fetch the YouTube watch page to extract captionTracks from ytInitialPlayerResponse
-  const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+  // Use the YouTube InnerTube API — works in serverless, returns structured JSON
+  const playerRes = await fetch('https://www.youtube.com/youtubei/v1/player', {
+    method: 'POST',
     headers: {
+      'Content-Type': 'application/json',
       'User-Agent': UA,
       'Accept-Language': 'en-US,en;q=0.9',
+      'X-YouTube-Client-Name': '1',
+      'X-YouTube-Client-Version': '2.20231219.04.00',
     },
+    body: JSON.stringify({
+      videoId,
+      context: {
+        client: {
+          clientName: 'WEB',
+          clientVersion: '2.20231219.04.00',
+          hl: 'en',
+          gl: 'US',
+        },
+      },
+    }),
   })
 
-  if (!pageRes.ok) throw new Error(`YouTube page fetch failed: ${pageRes.status}`)
+  if (!playerRes.ok) throw new Error(`InnerTube player request failed: ${playerRes.status}`)
 
-  const html = await pageRes.text()
-
-  // Extract captionTracks array from the embedded JSON
-  const match = html.match(/"captionTracks":\s*(\[[\s\S]*?\])/)
-  if (!match) throw new Error('No transcript available for this video.')
-
-  let tracks
-  try {
-    tracks = JSON.parse(match[1])
-  } catch {
-    throw new Error('Could not parse caption tracks.')
-  }
+  const playerData = await playerRes.json()
+  const tracks = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks
 
   if (!tracks?.length) throw new Error('No transcript available for this video.')
 
