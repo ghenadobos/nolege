@@ -59,28 +59,42 @@ export async function getTranscriptWithFallback(videoId) {
 }
 
 export async function fetchTranscript(videoId) {
-  const { Innertube } = await import('youtubei.js')
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
-  const yt = await Innertube.create({ generate_session_locally: true })
+  // Fetch the YouTube watch page to extract captionTracks from ytInitialPlayerResponse
+  const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+    headers: {
+      'User-Agent': UA,
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
+  })
 
-  const info = await yt.getInfo(videoId)
+  if (!pageRes.ok) throw new Error(`YouTube page fetch failed: ${pageRes.status}`)
 
-  // Get caption tracks from the player response
-  const tracks = info.captions?.caption_tracks
+  const html = await pageRes.text()
 
-  if (!tracks || tracks.length === 0) {
-    throw new Error('No transcript available for this video.')
+  // Extract captionTracks array from the embedded JSON
+  const match = html.match(/"captionTracks":\s*(\[[\s\S]*?\])/)
+  if (!match) throw new Error('No transcript available for this video.')
+
+  let tracks
+  try {
+    tracks = JSON.parse(match[1])
+  } catch {
+    throw new Error('Could not parse caption tracks.')
   }
 
+  if (!tracks?.length) throw new Error('No transcript available for this video.')
+
   const track =
-    tracks.find(t => t.language_code === 'en' && !t.kind) ||
-    tracks.find(t => t.language_code === 'en') ||
-    tracks.find(t => t.language_code?.startsWith('en')) ||
+    tracks.find(t => t.languageCode === 'en' && !t.kind) ||
+    tracks.find(t => t.languageCode === 'en') ||
+    tracks.find(t => t.languageCode?.startsWith('en')) ||
     tracks[0]
 
-  const captionRes = await fetch(track.base_url, {
+  const captionRes = await fetch(track.baseUrl, {
     headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      'User-Agent': UA,
       'Accept-Language': 'en-US,en;q=0.9',
       'Referer': 'https://www.youtube.com/',
     },
