@@ -68,6 +68,12 @@ function parseXml(xml) {
   return parseClassicXml(xml)
 }
 
+// ─── Consent cookies — required for YouTube access from cloud servers ────────
+const CONSENT_COOKIES = [
+  'CONSENT=YES+cb.20210328-17-p0.en+FX+999',
+  'SOCS=CAISNQgDEitib3FfaWRlbnRpdHlmcm9udGVuZHVpc2VydmVyXzIwMjMwODI5LjA3X3AxGgJlbiACGgYIgJnsBhAB',
+].join('; ')
+
 // ─── Fetch via ANDROID InnerTube client ──────────────────────────────────────
 // ANDROID client returns working caption URLs (WEB client URLs are often empty).
 
@@ -87,6 +93,7 @@ async function fetchViaAndroidInnerTube(videoId) {
       headers: {
         'Content-Type': 'application/json',
         'User-Agent': ANDROID_UA,
+        'Cookie': CONSENT_COOKIES,
       },
       body: JSON.stringify({
         context: ANDROID_CONTEXT,
@@ -117,7 +124,7 @@ async function fetchViaAndroidInnerTube(videoId) {
   console.log(`[transcript] using track: ${track.languageCode} (${track.kind || 'manual'})`)
 
   const capRes = await fetch(track.baseUrl, {
-    headers: { 'User-Agent': ANDROID_UA },
+    headers: { 'User-Agent': ANDROID_UA, 'Cookie': CONSENT_COOKIES },
   })
   if (!capRes.ok) throw new Error(`Caption fetch HTTP ${capRes.status}`)
 
@@ -142,7 +149,7 @@ async function fetchViaPageScrape(videoId) {
     headers: {
       'User-Agent': WEB_UA,
       'Accept-Language': 'en-US,en;q=0.9',
-      'Cookie': 'CONSENT=PENDING+999',
+      'Cookie': CONSENT_COOKIES,
     },
   })
   if (!pageRes.ok) throw new Error(`Page fetch HTTP ${pageRes.status}`)
@@ -178,7 +185,7 @@ async function fetchViaPageScrape(videoId) {
 
           // Fetch caption using ANDROID UA (WEB URLs often return empty)
           const capRes = await fetch(track.baseUrl, {
-            headers: { 'User-Agent': ANDROID_UA },
+            headers: { 'User-Agent': ANDROID_UA, 'Cookie': CONSENT_COOKIES },
           })
           const xml = await capRes.text()
           if (!xml || xml.length < 50) throw new Error('Caption XML empty')
