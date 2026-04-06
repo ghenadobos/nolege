@@ -1,6 +1,9 @@
 import OpenAI from 'openai'
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  timeout: 45_000,  // 45s per request — fail fast, don't hang until Vercel kills us
+})
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SAFE JSON PARSING — every AI response goes through this
@@ -147,34 +150,36 @@ function estimateSectionRange(charCount, chunkCount) {
 // We send the first ~150 chars of each chunk as a preview.
 
 async function labelChunks(chunks, language) {
-  // Build compact previews
+  // For very large transcripts, reduce preview length to keep prompt reasonable
+  const previewLen = chunks.length > 60 ? 100 : 150
+
   const previews = chunks.map((c, i) => {
     const ts = c.startTime ? `[${c.startTime}] ` : ''
-    const text = c.text.replace(/\n/g, ' ').slice(0, 150)
+    const text = c.text.replace(/\n/g, ' ').slice(0, previewLen)
     return `${i}: ${ts}${text}`
   }).join('\n')
 
-  console.log(`[label] sending ${chunks.length} chunk previews for topic labeling`)
+  console.log(`[label] sending ${chunks.length} chunk previews (${previewLen} chars each)`)
 
   const response = await client.chat.completions.create({
     model: 'gpt-4o',
     messages: [{
       role: 'user',
-      content: `You are labeling topics for a video transcript split into ${chunks.length} sequential chunks.
+      content: `Label topics for a video transcript split into ${chunks.length} chunks.
 
-For each chunk, return:
-- topic: short specific topic name (e.g. "SQL WHERE Clause", "React State Management")
-- newTopic: true if this chunk starts a NEW topic, false if it continues the previous chunk's topic
+For each chunk return:
+- topic: short specific name (e.g. "SQL WHERE Clause", "React State Management")
+- newTopic: true if this chunk starts a NEW topic, false if it continues the previous one
 
-CHUNK PREVIEWS:
+CHUNKS:
 ${previews}
 
-Output language for topic names: ${language}
+Language for topic names: ${language}
 
-Respond ONLY with valid JSON:
+Return ONLY valid JSON:
 {"labels":[{"topic":"string","newTopic":true}]}
 
-You MUST return exactly ${chunks.length} labels, one per chunk, in order.`,
+Return exactly ${chunks.length} labels in order.`,
     }],
     response_format: { type: 'json_object' },
     temperature: 0.15,
@@ -185,17 +190,26 @@ You MUST return exactly ${chunks.length} labels, one per chunk, in order.`,
 
   if (!parsed.ok || !Array.isArray(parsed.data?.labels)) {
     console.warn('[label] AI response invalid, falling back to uniform sections')
-    return null // caller will use fallback
-  }
-
-  const labels = parsed.data.labels
-  // Validate length — if AI returned wrong count, pad/trim
-  if (labels.length !== chunks.length) {
-    console.warn(`[label] expected ${chunks.length} labels, got ${labels.length} — using fallback`)
     return null
   }
 
-  console.log(`[label] topics: ${labels.map(l => l.topic).join(' | ')}`)
+  let labels = parsed.data.labels
+
+  // If AI returned fewer labels, pad with continuation markers
+  if (labels.length < chunks.length) {
+    console.warn(`[label] expected ${chunks.length} labels, got ${labels.length} — padding`)
+    const lastTopic = labels[labels.length - 1]?.topic || 'Continuation'
+    while (labels.length < chunks.length) {
+      labels.push({ topic: lastTopic, newTopic: false })
+    }
+  }
+  // If too many, trim
+  if (labels.length > chunks.length) {
+    labels = labels.slice(0, chunks.length)
+  }
+
+  const newTopicCount = labels.filter(l => l.newTopic).length
+  console.log(`[label] ${newTopicCount} topic transitions detected across ${chunks.length} chunks`)
   return labels
 }
 
@@ -287,7 +301,7 @@ function uniformSections(chunks, range) {
 // Runs in parallel batches of MAX_PARALLEL.
 // Errors are isolated — a failed section produces a minimal fallback.
 
-const MAX_PARALLEL = 5
+const MAX_PARALLEL = 8  // higher parallelism to finish faster within timeout
 
 async function generateSectionContent(sectionOutline, chunkText, learningType, language, totalSections) {
   const practiceInstr = PRACTICE_INSTRUCTIONS[learningType] || PRACTICE_INSTRUCTIONS.conceptual
@@ -421,9 +435,14 @@ async function generateStudyPack(transcript, learningType, language) {
   const range = estimateSectionRange(totalChars, chunks.length)
   console.log(`[pack] estimated ~${range.estMin}min, target sections: ${range.lo}–${range.hi}`)
 
-  // Step 2: Label each chunk's topic (one AI call)
+  // Step 2: Label each chunk's topic (one AI call, with fallback)
   let sectionOutlines
-  const labels = await labelChunks(chunks, language)
+  let labels = null
+  try {
+    labels = await labelChunks(chunks, language)
+  } catch (err) {
+    console.error(`[pack] labelChunks threw: ${err.message}`)
+  }
 
   if (labels) {
     // Step 3: Merge chunks into sections using backend rules
@@ -432,6 +451,26 @@ async function generateStudyPack(transcript, learningType, language) {
     // Fallback: uniform splitting
     console.warn('[pack] using uniform section split (labeling failed)')
     sectionOutlines = uniformSections(chunks, range)
+  }
+
+  // Cap sections to avoid timeout — max 3 parallel batches of 8 = 24 sections
+  const MAX_SECTIONS = 24
+  if (sectionOutlines.length > MAX_SECTIONS) {
+    console.warn(`[pack] capping ${sectionOutlines.length} sections to ${MAX_SECTIONS} to stay within timeout`)
+    // Merge smallest adjacent pairs until we're within limit
+    while (sectionOutlines.length > MAX_SECTIONS) {
+      let minSize = Infinity, minIdx = 0
+      for (let i = 0; i < sectionOutlines.length - 1; i++) {
+        const combined = sectionOutlines[i].chunkIndices.length + sectionOutlines[i + 1].chunkIndices.length
+        if (combined < minSize) { minSize = combined; minIdx = i }
+      }
+      sectionOutlines[minIdx] = {
+        title: sectionOutlines[minIdx].title,
+        chunkIndices: [...sectionOutlines[minIdx].chunkIndices, ...sectionOutlines[minIdx + 1].chunkIndices],
+        startTime: sectionOutlines[minIdx].startTime,
+      }
+      sectionOutlines.splice(minIdx + 1, 1)
+    }
   }
 
   console.log(`[pack] step 3: ${sectionOutlines.length} sections planned`)

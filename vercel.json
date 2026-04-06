@@ -2,7 +2,7 @@
   "framework": "nextjs",
   "functions": {
     "pages/api/summarize.js": {
-      "maxDuration": 300
+      "maxDuration": 60
     }
   }
 }
