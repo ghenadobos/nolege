@@ -2,8 +2,14 @@ import { extractVideoId, getTranscriptWithFallback } from '../../utils/transcrip
 import { processTranscript, classifyTranscript, MODES } from '../../utils/openai'
 import { enhancePackWithVisuals } from '../../utils/visualAnalysis'
 
+export const config = {
+  maxDuration: 300,  // 5 min — multi-step pipeline needs time for long videos
+}
+
 const VALID_MODES = MODES.map((m) => m.id)
 
+// For non-study-pack modes, we still sample to avoid exceeding token limits.
+// Study-pack mode handles its own chunking internally.
 function sampleTranscript(transcript, maxChars) {
   if (transcript.length <= maxChars) return transcript
   const lines = transcript.split('\n')
@@ -62,14 +68,17 @@ export default async function handler(req, res) {
       }
     }
 
-    const charLimits = { quick: 20000, standard: 50000, full: 100000 }
-    const trimmed = sampleTranscript(transcript, charLimits[depth] || 50000)
+    // For study-pack mode, pass the FULL transcript — the pipeline chunks it internally.
+    // For other modes, sample to fit within single-prompt token limits.
+    const processedTranscript = mode === 'study-pack'
+      ? transcript
+      : sampleTranscript(transcript, 50000)
 
     // Classify content type for study-pack (fast call on first 4k chars)
     let learningType = 'conceptual'
     if (mode === 'study-pack') {
       try {
-        const classification = await classifyTranscript(trimmed)
+        const classification = await classifyTranscript(processedTranscript)
         learningType = classification.learningType || 'conceptual'
         console.log(`[classify] ${learningType} (confidence: ${classification.confidence}) — ${classification.reason}`)
       } catch (err) {
@@ -79,7 +88,7 @@ export default async function handler(req, res) {
 
     let result
     try {
-      result = await processTranscript(trimmed, mode, depth, learningType, languageName)
+      result = await processTranscript(processedTranscript, mode, depth, learningType, languageName)
     } catch (err) {
       console.error('OpenAI error:', err?.message)
       return res.status(500).json({ error: `AI processing failed: ${err?.message || 'unknown error'}` })
