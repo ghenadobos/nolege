@@ -74,6 +74,8 @@ export default async function handler(req, res) {
       ? transcript
       : sampleTranscript(transcript, 50000)
 
+    console.log(`[summarize] mode=${mode} depth=${depth} lang=${language} transcript=${transcript.length} chars, source=${transcriptSource}`)
+
     // Classify content type for study-pack (fast call on first 4k chars)
     let learningType = 'conceptual'
     if (mode === 'study-pack') {

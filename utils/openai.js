@@ -2,220 +2,88 @@ import OpenAI from 'openai'
 
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
 
-// ─── Simple mode prompts (non-study-pack) ────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// SAFE JSON PARSING — every AI response goes through this
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function safeParseJSON(raw, context = 'unknown') {
+  try {
+    return { ok: true, data: JSON.parse(raw) }
+  } catch (err) {
+    console.error(`[json] parse failed in ${context}: ${err.message}`)
+    console.error(`[json] raw (first 500 chars): ${(raw || '').slice(0, 500)}`)
+    return { ok: false, data: null, error: err.message }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SIMPLE MODE PROMPTS (non-study-pack)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 const PROMPTS = {
   'action-steps': `You are a practical assistant.
-
 Extract ONLY concrete, executable actions from this video.
+Respond ONLY with valid JSON:
+{"goal":"string","steps":["string"],"mistakes":["string"]}`,
 
-OUTPUT:
+  'summary': `Summarize this video concisely. 3–5 bullet points, max 1 sentence each.
+Respond ONLY with valid JSON:
+{"bullets":["string"]}`,
 
-GOAL:
-- What the user can achieve
+  'key-insights': `Extract 3–5 non-obvious, valuable insights from this video.
+Respond ONLY with valid JSON:
+{"insights":[{"insight":"string","why":"string"}]}`,
 
-STEPS:
-- 3–5 specific actions
-- Each must be immediately doable
-- No generic advice like "learn" or "understand"
+  'study-notes': `Turn this video into structured study notes with topics, key points, and a quick review.
+Respond ONLY with valid JSON:
+{"topics":[{"title":"string","points":["string"]}],"quickReview":"string"}`,
 
-MISTAKES TO AVOID:
-- Common pitfalls mentioned or implied in the video
+  'study-pack': `Placeholder — study-pack uses the multi-step pipeline below.`,
 
-Be specific and practical.
-
-Respond ONLY with valid JSON in this exact structure:
-{
-  "goal": "string",
-  "steps": ["string"],
-  "mistakes": ["string"]
-}`,
-
-  'summary': `Summarize this video in the most concise way possible.
-
-OUTPUT:
-- 3–5 bullet points
-- Max 1 sentence each
-
-Avoid fluff.
-Focus only on key information.
-
-Respond ONLY with valid JSON in this exact structure:
-{
-  "bullets": ["string"]
-}`,
-
-  'key-insights': `Extract the most valuable insights from this video.
-
-OUTPUT:
-
-INSIGHTS:
-- 3–5 non-obvious ideas
-
-WHY THEY MATTER:
-- Why each insight is useful
-
-Avoid obvious or generic statements.
-
-Respond ONLY with valid JSON in this exact structure:
-{
-  "insights": [
-    {"insight": "string", "why": "string"}
-  ]
-}`,
-
-  'study-notes': `Turn this video into structured study notes.
-
-OUTPUT:
-
-TOPICS:
-- Organized sections from the video
-
-KEY POINTS:
-- Bullet points per topic
-
-QUICK REVIEW:
-- Short recap of everything covered
-
-Make it clean and structured.
-
-Respond ONLY with valid JSON in this exact structure:
-{
-  "topics": [
-    {"title": "string", "points": ["string"]}
-  ],
-  "quickReview": "string"
-}`,
-
-  'study-pack': `You are a study assistant.
-
-Turn this YouTube transcript into a STUDY PACK.
-
-Do NOT summarize.
-Focus on helping the user learn and remember.
-
----
-
-OUTPUT:
-
-NOTES:
-- Organized into topics
-- Bullet points
-
-KEY CONCEPTS:
-- Important definitions and terms
-
-QUIZ:
-- 5 multiple-choice questions
-- Include correct answers separately
-
-FLASHCARDS:
-- 5–10 Q&A pairs for memorization
-
----
-
-RULES:
-
-- Be clear and structured
-- Focus on learning
-- Avoid fluff
-- Make quiz questions meaningful
-- Flashcards should test understanding, not trivial facts
-
-Respond ONLY with valid JSON in this exact structure:
-{
-  "notes": [
-    {"topic": "string", "points": ["string"]}
-  ],
-  "keyConcepts": [
-    {"term": "string", "definition": "string"}
-  ],
-  "quiz": [
-    {
-      "question": "string",
-      "options": ["A. string", "B. string", "C. string", "D. string"],
-      "answer": "string (e.g. A)"
-    }
-  ],
-  "flashcards": [
-    {"question": "string", "answer": "string"}
-  ]
-}`,
-
-  'decision-help': `Help the user make a decision based on this video.
-
-OUTPUT:
-
-WHAT IS BEING EVALUATED:
-- The product, idea, or topic being discussed
-
-PROS:
-- Clear benefits
-
-CONS:
-- Real downsides
-
-FINAL TAKE:
-- When it is worth it and when it is not
-
-Be practical and honest.
-
-Respond ONLY with valid JSON in this exact structure:
-{
-  "evaluated": "string",
-  "pros": ["string"],
-  "cons": ["string"],
-  "finalTake": "string"
-}`,
+  'decision-help': `Help the user make a decision based on this video: what is evaluated, pros, cons, final take.
+Respond ONLY with valid JSON:
+{"evaluated":"string","pros":["string"],"cons":["string"],"finalTake":"string"}`,
 }
 
-// ─── Per-learning-type practice instructions ──────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// PER-LEARNING-TYPE PRACTICE INSTRUCTIONS
+// ═══════════════════════════════════════════════════════════════════════════════
 
 const PRACTICE_INSTRUCTIONS = {
-  coding: `PRACTICE — This is a CODING/TECHNICAL video.
-For each section that covers a technical concept, generate 2–3 exercises using these types:
-- predict_output: put a real code/query snippet in "code", ask what it returns, provide 4 MC options + correct answer letter + explanation
-- write_code: ask user to write a function/query from scratch — include referenceAnswer and evaluationRubric checklist
-- fix_code: put buggy code in "code" field, ask user to fix it — include referenceAnswer with the corrected version
-For intro/non-technical sections set practice to [].
-DO NOT generate solve_problem, short_answer, or any non-coding types.`,
+  coding: `PRACTICE EXERCISES (coding/technical):
+Generate 1–2 exercises per section using ONLY these types:
+- predict_output: code snippet in "code", 4 MC options, correct answer letter
+- write_code: ask user to write function/query, include referenceAnswer + evaluationRubric
+- fix_code: buggy code in "code", include referenceAnswer with fix
+Set practice to [] for non-technical sections.`,
 
-  math: `PRACTICE — This is a MATH/PROBLEM-SOLVING video.
-For each section that contains solvable problems, generate 2–3 exercises using these types:
-- solve_problem: pose a full problem — include referenceAnswer with step-by-step solution and evaluationRubric
-- numeric_answer: ask for a specific numeric result — set "answer" to the exact value (e.g. "42" or "1/2")
-- explain_steps: ask user to explain how to approach a problem type — include referenceAnswer with key steps
-- find_the_mistake: put a worked solution with a deliberate error in "code" field, ask where the mistake is — include referenceAnswer with the explanation
-For conceptual/intro sections set practice to [].
-DO NOT generate write_code or any programming tasks.`,
+  math: `PRACTICE EXERCISES (math/problem-solving):
+Generate 1–2 exercises per section using ONLY these types:
+- solve_problem: full problem with referenceAnswer (step-by-step) + evaluationRubric
+- numeric_answer: specific numeric result, set "answer" to exact value
+- explain_steps: explain approach, include referenceAnswer
+Set practice to [] for non-math sections.`,
 
-  conceptual: `PRACTICE — This is a CONCEPTUAL/THEORY video.
-For each section that covers a key idea, generate 2–3 exercises using these types:
-- short_answer: ask a focused factual question about the section — include referenceAnswer
-- explain_concept: ask user to explain a concept in their own words — include referenceAnswer
-- apply_the_idea: describe a real scenario and ask user to apply the concept — include referenceAnswer
-For trivial/transitional sections set practice to [].
-DO NOT generate write_code, solve_problem, or any coding/math tasks.`,
+  conceptual: `PRACTICE EXERCISES (conceptual/theory):
+Generate 1–2 exercises per section using ONLY these types:
+- short_answer: focused factual question, include referenceAnswer
+- explain_concept: explain in own words, include referenceAnswer
+- apply_the_idea: real scenario to apply concept, include referenceAnswer
+Set practice to [] for trivial/transitional sections.`,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ─── MULTI-STEP STUDY PACK PIPELINE ──────────────────────────────────────────
-// ═══════════════════════════════════════════════════════════════════════════════
+// STUDY PACK PIPELINE
 //
-// Architecture:
-//   Step 1: Chunk transcript into ~1500-char segments with timestamps
-//   Step 2: Outline — AI groups chunks into logical sections (topic detection)
-//   Step 3: Generate — AI creates full content for each section (parallel)
-//   Step 4: Validate — check section count, split bloated sections, merge dupes
-//
-// This replaces the old single-pass approach where one prompt tried to produce
-// the entire study pack at once, causing long videos to collapse into 2-3 sections.
+// Architecture (4 steps, no recursive retries):
+//   1. Chunk transcript deterministically (~1500 chars each)
+//   2. Label each chunk's topic via AI (one batched call)
+//   3. Merge chunks into sections using backend rules
+//   4. Generate content per section (parallel batches of 5)
+//   + Lightweight validation (no extra AI calls)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ─── Step 1: Chunk transcript ────────────────────────────────────────────────
-// Splits transcript into segments of roughly CHUNK_TARGET_CHARS characters,
-// preserving line boundaries. Each chunk records its start/end timestamps
-// extracted from the [MM:SS] prefixes in the transcript lines.
+// ─── Step 1: Deterministic chunking ─────────────────────────────────────────
 
 const CHUNK_TARGET_CHARS = 1500
 
@@ -224,25 +92,25 @@ function chunkTranscript(transcript) {
   if (lines.length === 0) return []
 
   const chunks = []
-  let currentLines = []
-  let currentLen = 0
+  let buf = []
+  let bufLen = 0
 
   for (const line of lines) {
-    currentLines.push(line)
-    currentLen += line.length + 1
-    if (currentLen >= CHUNK_TARGET_CHARS) {
-      chunks.push(buildChunk(currentLines, chunks.length))
-      currentLines = []
-      currentLen = 0
+    buf.push(line)
+    bufLen += line.length + 1
+    if (bufLen >= CHUNK_TARGET_CHARS) {
+      chunks.push(makeChunk(buf, chunks.length))
+      buf = []
+      bufLen = 0
     }
   }
-  if (currentLines.length > 0) {
-    chunks.push(buildChunk(currentLines, chunks.length))
+  if (buf.length > 0) {
+    chunks.push(makeChunk(buf, chunks.length))
   }
   return chunks
 }
 
-function buildChunk(lines, index) {
+function makeChunk(lines, index) {
   const text = lines.join('\n')
   const firstTs = extractTimestamp(lines[0])
   const lastTs = extractTimestamp(lines[lines.length - 1])
@@ -254,178 +122,221 @@ function extractTimestamp(line) {
   return m ? m[1] : null
 }
 
-// ─── Estimate target section count ───────────────────────────────────────────
-// Uses transcript length as the primary signal since we often don't have exact
-// video duration. The heuristics match the user's desired ranges:
-//   <10min → 2-4, 10-30min → 4-8, 30-60min → 6-12,
-//   1-2h → 10-20, 2-4h → 16-35, 4h+ → 25+
+// ─── Section range heuristics ───────────────────────────────────────────────
+// ~1000 chars/min for YouTube captions is a reasonable estimate.
 
-function estimateSectionRange(transcriptCharCount, chunkCount) {
-  // A rough estimate: YouTube captions produce ~800-1200 chars/minute.
-  // Use 1000 chars/min as middle ground.
-  const estMinutes = transcriptCharCount / 1000
+function estimateSectionRange(charCount, chunkCount) {
+  const estMin = charCount / 1000
 
-  let min, max
-  if (estMinutes < 10)       { min = 2;  max = 4  }
-  else if (estMinutes < 30)  { min = 4;  max = 8  }
-  else if (estMinutes < 60)  { min = 6;  max = 12 }
-  else if (estMinutes < 120) { min = 10; max = 20 }
-  else if (estMinutes < 240) { min = 16; max = 35 }
-  else                       { min = 25; max = 50 }
+  let lo, hi
+  if (estMin < 10)       { lo = 2;  hi = 4  }
+  else if (estMin < 30)  { lo = 4;  hi = 7  }
+  else if (estMin < 60)  { lo = 6;  hi = 10 }
+  else if (estMin < 120) { lo = 10; hi = 16 }
+  else if (estMin < 240) { lo = 16; hi = 28 }
+  else                   { lo = 22; hi = 40 }
 
-  // Never request more sections than we have chunks
-  max = Math.min(max, chunkCount)
-  min = Math.min(min, max)
+  hi = Math.min(hi, chunkCount)
+  lo = Math.min(lo, hi)
 
-  return { min, max, estMinutes: Math.round(estMinutes) }
+  return { lo, hi, estMin: Math.round(estMin) }
 }
 
-// ─── Step 2: Outline — AI groups chunks into sections ────────────────────────
-// Sends the chunk summaries to the model and asks it to group them into
-// logical sections based on topic transitions. This is a lightweight call
-// (~4k tokens input) that produces just the outline, not the full content.
+// ─── Step 2: Label each chunk's topic (one AI call) ─────────────────────────
+// Ask AI for a short topic label + whether it's a new topic vs continuation.
+// We send the first ~150 chars of each chunk as a preview.
 
-async function generateOutline(chunks, sectionRange, language) {
-  // Build a condensed view: first 200 chars of each chunk + timestamps
-  const chunkSummaries = chunks.map((c, i) => {
-    const preview = c.text.slice(0, 200).replace(/\n/g, ' ')
-    const ts = c.startTime ? `[${c.startTime}]` : ''
-    return `Chunk ${i}: ${ts} ${preview}...`
+async function labelChunks(chunks, language) {
+  // Build compact previews
+  const previews = chunks.map((c, i) => {
+    const ts = c.startTime ? `[${c.startTime}] ` : ''
+    const text = c.text.replace(/\n/g, ' ').slice(0, 150)
+    return `${i}: ${ts}${text}`
   }).join('\n')
+
+  console.log(`[label] sending ${chunks.length} chunk previews for topic labeling`)
 
   const response = await client.chat.completions.create({
     model: 'gpt-4o',
     messages: [{
       role: 'user',
-      content: `You are building a study outline from a video transcript that has been split into ${chunks.length} sequential chunks.
+      content: `You are labeling topics for a video transcript split into ${chunks.length} sequential chunks.
 
-ESTIMATED VIDEO LENGTH: ~${sectionRange.estMinutes} minutes
-TARGET SECTION COUNT: ${sectionRange.min}–${sectionRange.max} sections (adapt to actual topic density)
-
-Your job: group these chunks into logical sections. Each section = one coherent topic/concept block.
+For each chunk, return:
+- topic: short specific topic name (e.g. "SQL WHERE Clause", "React State Management")
+- newTopic: true if this chunk starts a NEW topic, false if it continues the previous chunk's topic
 
 CHUNK PREVIEWS:
-${chunkSummaries}
+${previews}
 
-RULES:
-- Each section must list which chunk indices it covers (e.g. [0,1,2])
-- Sections must be in order and cover ALL chunks — no gaps, no overlaps
-- Section titles must be SPECIFIC to the content (e.g. "SQL JOIN Types and When to Use Them"), never generic ("Part 1", "Introduction", "Main Content")
-- Only use "Introduction" if the first few chunks are truly introductory
-- If a topic spans many chunks, that's ONE section (don't split mid-concept)
-- If a chunk covers a topic shift, start a new section
-- Prefer more smaller sections over fewer large ones — each section should be a clear subtopic
-- Output language: ${language}
+Output language for topic names: ${language}
 
 Respond ONLY with valid JSON:
-{
-  "sections": [
-    {
-      "title": "string — specific descriptive title",
-      "chunkIndices": [0, 1, 2],
-      "startTime": "MM:SS or null",
-      "summary": "1-sentence description of what this section covers"
-    }
-  ]
-}`,
+{"labels":[{"topic":"string","newTopic":true}]}
+
+You MUST return exactly ${chunks.length} labels, one per chunk, in order.`,
     }],
     response_format: { type: 'json_object' },
-    temperature: 0.2,
+    temperature: 0.15,
   })
 
-  const data = JSON.parse(response.choices[0].message.content)
-  return data.sections || []
-}
+  const raw = response.choices[0].message.content
+  const parsed = safeParseJSON(raw, 'labelChunks')
 
-// ─── Step 3: Generate full content per section ───────────────────────────────
-// For each outlined section, sends the FULL chunk text and asks the model to
-// produce notes, quiz, flashcards, and practice. Runs in parallel batches.
-
-const SECTION_OUTPUT_SCHEMA = `Respond ONLY with valid JSON:
-{
-  "title": "string",
-  "startTime": "MM:SS",
-  "notes": ["string — bullet point"],
-  "keyConcepts": [{"term": "string", "definition": "string"}],
-  "quiz": [
-    {
-      "question": "string",
-      "options": ["A. string", "B. string", "C. string", "D. string"],
-      "answer": "string (letter only, e.g. B)",
-      "explanation": "string — why the correct answer is right",
-      "questionType": "concept|application|comparison|error_detection|reasoning"
-    }
-  ],
-  "flashcards": [{"question": "string", "answer": "string"}],
-  "practice": [
-    {
-      "type": "string",
-      "prompt": "string",
-      "code": "string (optional)",
-      "options": ["A. string", "B. string", "C. string", "D. string"] ,
-      "answer": "string (optional)",
-      "explanation": "string (optional)",
-      "referenceAnswer": "string (optional)",
-      "evaluationRubric": ["string"]
-    }
-  ]
-}`
-
-async function generateSectionContent(outline, chunkTexts, learningType, language, totalSections) {
-  const practiceInstr = PRACTICE_INSTRUCTIONS[learningType] || PRACTICE_INSTRUCTIONS.conceptual
-
-  // Scale content amounts based on how many sections there are.
-  // With many sections, each section is smaller so fewer items per section.
-  // With few sections, each covers more ground so more items per section.
-  let notesRange, conceptsRange, quizRange, cardsRange, practiceRange
-  if (totalSections <= 4) {
-    notesRange = '8–12'; conceptsRange = '5–7'; quizRange = '5–8'; cardsRange = '8–12'; practiceRange = '2–3'
-  } else if (totalSections <= 10) {
-    notesRange = '5–8'; conceptsRange = '3–5'; quizRange = '5–7'; cardsRange = '5–8'; practiceRange = '1–2'
-  } else if (totalSections <= 20) {
-    notesRange = '4–6'; conceptsRange = '2–4'; quizRange = '5–6'; cardsRange = '4–6'; practiceRange = '1–2'
-  } else {
-    notesRange = '3–5'; conceptsRange = '2–3'; quizRange = '5'; cardsRange = '3–5'; practiceRange = '1'
+  if (!parsed.ok || !Array.isArray(parsed.data?.labels)) {
+    console.warn('[label] AI response invalid, falling back to uniform sections')
+    return null // caller will use fallback
   }
 
-  const prompt = `You are a study assistant generating content for ONE section of a study pack.
+  const labels = parsed.data.labels
+  // Validate length — if AI returned wrong count, pad/trim
+  if (labels.length !== chunks.length) {
+    console.warn(`[label] expected ${chunks.length} labels, got ${labels.length} — using fallback`)
+    return null
+  }
 
-SECTION: "${outline.title}"
-SECTION SUMMARY: ${outline.summary || 'N/A'}
-This is section in a pack with ${totalSections} total sections.
+  console.log(`[label] topics: ${labels.map(l => l.topic).join(' | ')}`)
+  return labels
+}
 
-Generate study content from the transcript excerpt below.
+// ─── Step 3: Merge chunks into sections (backend logic) ─────────────────────
+// Uses topic labels to group adjacent chunks. New topic = new section.
+// Enforces min/max chunks per section based on target range.
 
-PER-SECTION REQUIREMENTS:
-- notes: ${notesRange} bullet points covering the key ideas in this section
-- keyConcepts: ${conceptsRange} important terms with clear definitions
-- quiz: ${quizRange} multiple-choice questions — MINIMUM 5, each with a DIFFERENT questionType
-- flashcards: ${cardsRange} Q&A pairs for memorization
-- practice: ${practiceRange} exercises
+function mergeChunksIntoSections(chunks, labels, range) {
+  const sections = []
+  let current = { title: labels[0]?.topic || 'Section 1', chunkIndices: [0], startTime: chunks[0]?.startTime }
 
-QUIZ RULES — MANDATORY TYPE DISTRIBUTION:
-Every section must have at least 5 questions covering these cognitive types:
-  [concept] Test understanding of the core idea or definition.
-  [application] Apply the concept to a concrete scenario.
-  [comparison] Compare or contrast two related ideas.
-  [error_detection] Identify a wrong claim or common mistake.
-  [reasoning] Edge case, implication, or deeper thinking.
-Each question MUST have: questionType, explanation (1-2 sentences), 4 plausible options (A-D).
-Do NOT assign the same questionType to two questions unless all 5 types are covered.
+  for (let i = 1; i < chunks.length; i++) {
+    const label = labels[i]
+    if (label?.newTopic) {
+      sections.push(current)
+      current = { title: label.topic || `Section ${sections.length + 2}`, chunkIndices: [i], startTime: chunks[i]?.startTime }
+    } else {
+      current.chunkIndices.push(i)
+    }
+  }
+  sections.push(current)
+
+  // If too many sections, merge smallest adjacent pairs
+  while (sections.length > range.hi) {
+    let minSize = Infinity
+    let minIdx = 0
+    for (let i = 0; i < sections.length - 1; i++) {
+      const combined = sections[i].chunkIndices.length + sections[i + 1].chunkIndices.length
+      if (combined < minSize) { minSize = combined; minIdx = i }
+    }
+    // Merge minIdx and minIdx+1
+    sections[minIdx] = {
+      title: sections[minIdx].title,
+      chunkIndices: [...sections[minIdx].chunkIndices, ...sections[minIdx + 1].chunkIndices],
+      startTime: sections[minIdx].startTime,
+    }
+    sections.splice(minIdx + 1, 1)
+  }
+
+  // If too few sections, split the largest ones
+  while (sections.length < range.lo) {
+    let maxSize = 0
+    let maxIdx = 0
+    for (let i = 0; i < sections.length; i++) {
+      if (sections[i].chunkIndices.length > maxSize) {
+        maxSize = sections[i].chunkIndices.length
+        maxIdx = i
+      }
+    }
+    if (maxSize < 2) break // can't split single-chunk sections
+
+    const sec = sections[maxIdx]
+    const mid = Math.ceil(sec.chunkIndices.length / 2)
+    const firstHalf = sec.chunkIndices.slice(0, mid)
+    const secondHalf = sec.chunkIndices.slice(mid)
+
+    // Use the topic label from the first chunk of the second half for the split title
+    const secondLabel = labels[secondHalf[0]]?.topic || `${sec.title} (continued)`
+
+    sections.splice(maxIdx, 1,
+      { title: sec.title, chunkIndices: firstHalf, startTime: sec.startTime },
+      { title: secondLabel, chunkIndices: secondHalf, startTime: chunks[secondHalf[0]]?.startTime }
+    )
+  }
+
+  console.log(`[merge] ${sections.length} sections after merge/split (target ${range.lo}–${range.hi})`)
+  return sections
+}
+
+// Fallback when AI labeling fails: split chunks evenly into sections
+function uniformSections(chunks, range) {
+  const target = Math.min(range.hi, Math.max(range.lo, Math.ceil(chunks.length / 3)))
+  const perSection = Math.ceil(chunks.length / target)
+  const sections = []
+  for (let i = 0; i < chunks.length; i += perSection) {
+    const indices = []
+    for (let j = i; j < Math.min(i + perSection, chunks.length); j++) indices.push(j)
+    sections.push({
+      title: `Section ${sections.length + 1}`,
+      chunkIndices: indices,
+      startTime: chunks[i]?.startTime,
+    })
+  }
+  return sections
+}
+
+// ─── Step 4: Generate content per section ───────────────────────────────────
+// Each section gets its own API call with ONLY its chunk text.
+// Runs in parallel batches of MAX_PARALLEL.
+// Errors are isolated — a failed section produces a minimal fallback.
+
+const MAX_PARALLEL = 5
+
+async function generateSectionContent(sectionOutline, chunkText, learningType, language, totalSections) {
+  const practiceInstr = PRACTICE_INSTRUCTIONS[learningType] || PRACTICE_INSTRUCTIONS.conceptual
+
+  // Scale content per section based on total count
+  let notes, concepts, quiz, cards, practice
+  if (totalSections <= 4) {
+    notes = '8–12'; concepts = '4–6'; quiz = '6–8'; cards = '6–10'; practice = '2–3'
+  } else if (totalSections <= 10) {
+    notes = '5–8'; concepts = '3–5'; quiz = '5–7'; cards = '4–7'; practice = '1–2'
+  } else if (totalSections <= 20) {
+    notes = '4–6'; concepts = '2–4'; quiz = '5–6'; cards = '3–5'; practice = '1'
+  } else {
+    notes = '3–5'; concepts = '2–3'; quiz = '5'; cards = '3–4'; practice = '1'
+  }
+
+  const prompt = `Generate study content for this section of a video study pack.
+
+SECTION TITLE: "${sectionOutline.title}"
+
+REQUIREMENTS:
+- notes: ${notes} bullet points (key ideas, learning-focused)
+- keyConcepts: ${concepts} terms with definitions
+- quiz: ${quiz} multiple-choice questions (MINIMUM 5)
+- flashcards: ${cards} Q&A pairs
+- practice: ${practice} exercises
+
+QUIZ TYPES (use all 5 if possible, at least 3 different):
+concept | application | comparison | error_detection | reasoning
+Each question needs: questionType, explanation, 4 options (A-D), answer (letter).
 
 ${practiceInstr}
 
-RULES:
-- Be specific to THIS section's content — no generic filler
-- Notes should be learning-focused, not just a transcript summary
-- Flashcards should test understanding and application
-- Output language: ${language}
-- Meet or exceed all minimum counts
+Output language: ${language}
 
-${SECTION_OUTPUT_SCHEMA}
+Respond ONLY with valid JSON:
+{
+  "notes":["string"],
+  "keyConcepts":[{"term":"string","definition":"string"}],
+  "quiz":[{"question":"string","options":["A. str","B. str","C. str","D. str"],"answer":"string","explanation":"string","questionType":"string"}],
+  "flashcards":[{"question":"string","answer":"string"}],
+  "practice":[{"type":"string","prompt":"string","code":"string","options":["string"],"answer":"string","explanation":"string","referenceAnswer":"string","evaluationRubric":["string"]}]
+}
 
-TRANSCRIPT EXCERPT:
-${chunkTexts}`
+TRANSCRIPT:
+${chunkText}`
+
+  const estTokens = Math.round(prompt.length / 4)
+  console.log(`[gen] section "${sectionOutline.title}" — ~${estTokens} input tokens`)
 
   const response = await client.chat.completions.create({
     model: 'gpt-4o',
@@ -434,268 +345,150 @@ ${chunkTexts}`
     temperature: 0.3,
   })
 
-  const section = JSON.parse(response.choices[0].message.content)
-  // Ensure the title and startTime from the outline are preserved
-  section.title = outline.title
-  if (outline.startTime) section.startTime = outline.startTime
-  return section
+  const raw = response.choices[0].message.content
+  const parsed = safeParseJSON(raw, `section "${sectionOutline.title}"`)
+
+  if (!parsed.ok) {
+    console.error(`[gen] FAILED to parse section "${sectionOutline.title}" — returning minimal fallback`)
+    return makeFallbackSection(sectionOutline)
+  }
+
+  const section = parsed.data
+  // Ensure required fields exist with correct types
+  return {
+    title: sectionOutline.title,
+    startTime: sectionOutline.startTime || section.startTime || null,
+    notes: Array.isArray(section.notes) ? section.notes : [],
+    keyConcepts: Array.isArray(section.keyConcepts) ? section.keyConcepts : [],
+    quiz: Array.isArray(section.quiz) ? section.quiz : [],
+    flashcards: Array.isArray(section.flashcards) ? section.flashcards : [],
+    practice: Array.isArray(section.practice) ? section.practice : [],
+  }
 }
 
-// ─── Step 4: Validate sections ───────────────────────────────────────────────
-// Checks for common failures: too few sections, bloated sections, generic titles.
-// Returns the sections array (possibly modified) and a log of actions taken.
+function makeFallbackSection(outline) {
+  return {
+    title: outline.title,
+    startTime: outline.startTime || null,
+    notes: ['Content generation failed for this section.'],
+    keyConcepts: [],
+    quiz: [],
+    flashcards: [],
+    practice: [],
+  }
+}
 
-function validateSections(sections, sectionRange, transcriptCharCount) {
+// ─── Lightweight validation (no extra AI calls) ─────────────────────────────
+
+function validateSections(sections, range) {
   const log = []
 
-  // Check: section count vs expected range
-  if (sections.length < sectionRange.min) {
-    log.push(`WARNING: only ${sections.length} sections for ~${sectionRange.estMinutes}min video (expected ${sectionRange.min}-${sectionRange.max})`)
+  if (sections.length < range.lo) {
+    log.push(`WARN: ${sections.length} sections, expected at least ${range.lo} for ~${range.estMin}min video`)
   }
 
-  // Check for generic titles
-  const genericTitles = ['Introduction', 'Main Content', 'Part 1', 'Part 2', 'Overview', 'Conclusion', 'Summary']
+  // Check for empty sections
+  let emptyCount = 0
   for (const s of sections) {
-    if (genericTitles.some(g => s.title?.toLowerCase().trim() === g.toLowerCase())) {
-      log.push(`NOTE: generic title "${s.title}" — consider making it more specific`)
-    }
+    if (!s.notes?.length && !s.quiz?.length) emptyCount++
+  }
+  if (emptyCount > 0) {
+    log.push(`WARN: ${emptyCount} section(s) have no notes and no quiz`)
   }
 
-  // Check for near-duplicate adjacent sections (by title similarity)
-  for (let i = 1; i < sections.length; i++) {
-    const prev = sections[i - 1].title?.toLowerCase() || ''
-    const curr = sections[i].title?.toLowerCase() || ''
-    if (prev === curr || (prev.length > 5 && curr.startsWith(prev.slice(0, Math.floor(prev.length * 0.7))))) {
-      log.push(`NOTE: sections ${i} and ${i + 1} have very similar titles: "${sections[i - 1].title}" / "${sections[i].title}"`)
-    }
-  }
+  // Log quiz coverage
+  const totalQuiz = sections.reduce((sum, s) => sum + (s.quiz?.length || 0), 0)
+  const totalCards = sections.reduce((sum, s) => sum + (s.flashcards?.length || 0), 0)
+  log.push(`STATS: ${sections.length} sections, ${totalQuiz} quiz questions, ${totalCards} flashcards`)
 
-  // Guardrail: absolute minimums for long content
-  const minByDuration = getMinSections(sectionRange.estMinutes)
-  if (sections.length < minByDuration) {
-    log.push(`GUARDRAIL: ${sections.length} sections is below minimum ${minByDuration} for ~${sectionRange.estMinutes}min content`)
-  }
-
-  return { sections, log }
+  return log
 }
 
-function getMinSections(estMinutes) {
-  if (estMinutes > 240) return 16
-  if (estMinutes > 180) return 12
-  if (estMinutes > 90)  return 8
-  if (estMinutes > 60)  return 6
-  if (estMinutes > 30)  return 4
-  return 2
-}
-
-// ─── Pipeline orchestrator ───────────────────────────────────────────────────
-// This is the main entry point for study-pack generation.
-// It replaces the old single-pass processTranscript for study-pack mode.
-
-const MAX_PARALLEL = 5  // max concurrent section generation calls
+// ─── Pipeline orchestrator ──────────────────────────────────────────────────
 
 async function generateStudyPack(transcript, learningType, language) {
   const totalChars = transcript.length
+  console.log(`[pack] START — ${totalChars} chars, learningType=${learningType}, language=${language}`)
 
-  // Step 1: Chunk the transcript
+  // Step 1: Deterministic chunking
   const chunks = chunkTranscript(transcript)
-  console.log(`[pack] chunked transcript: ${chunks.length} chunks, ${totalChars} chars`)
+  console.log(`[pack] step 1: ${chunks.length} chunks`)
 
   if (chunks.length === 0) {
     throw new Error('Transcript is empty — cannot generate study pack')
   }
 
-  // Estimate section range
-  const sectionRange = estimateSectionRange(totalChars, chunks.length)
-  console.log(`[pack] estimated ~${sectionRange.estMinutes}min, targeting ${sectionRange.min}–${sectionRange.max} sections`)
+  const range = estimateSectionRange(totalChars, chunks.length)
+  console.log(`[pack] estimated ~${range.estMin}min, target sections: ${range.lo}–${range.hi}`)
 
-  // Step 2: Generate outline (lightweight call to group chunks into sections)
-  const outline = await generateOutline(chunks, sectionRange, language)
-  console.log(`[pack] outline: ${outline.length} sections planned`)
+  // Step 2: Label each chunk's topic (one AI call)
+  let sectionOutlines
+  const labels = await labelChunks(chunks, language)
 
-  if (!outline.length) {
-    throw new Error('Outline generation returned 0 sections')
+  if (labels) {
+    // Step 3: Merge chunks into sections using backend rules
+    sectionOutlines = mergeChunksIntoSections(chunks, labels, range)
+  } else {
+    // Fallback: uniform splitting
+    console.warn('[pack] using uniform section split (labeling failed)')
+    sectionOutlines = uniformSections(chunks, range)
   }
 
-  // Step 3: Generate content for each section (parallel in batches)
+  console.log(`[pack] step 3: ${sectionOutlines.length} sections planned`)
+
+  // Step 4: Generate content per section (parallel batches, error-isolated)
   const sections = []
-  for (let i = 0; i < outline.length; i += MAX_PARALLEL) {
-    const batch = outline.slice(i, i + MAX_PARALLEL)
-    const results = await Promise.all(
-      batch.map(sec => {
-        // Gather the full text of all chunks assigned to this section
-        const indices = sec.chunkIndices || [sec.index || i]
-        const sectionText = indices
+  for (let batchStart = 0; batchStart < sectionOutlines.length; batchStart += MAX_PARALLEL) {
+    const batch = sectionOutlines.slice(batchStart, batchStart + MAX_PARALLEL)
+
+    const results = await Promise.allSettled(
+      batch.map(outline => {
+        const text = outline.chunkIndices
           .map(idx => chunks[idx]?.text || '')
           .filter(Boolean)
           .join('\n')
-        return generateSectionContent(sec, sectionText, learningType, language, outline.length)
+        return generateSectionContent(outline, text, learningType, language, sectionOutlines.length)
       })
     )
-    sections.push(...results)
-    if (i + MAX_PARALLEL < outline.length) {
-      console.log(`[pack] generated ${sections.length}/${outline.length} sections...`)
+
+    for (let j = 0; j < results.length; j++) {
+      if (results[j].status === 'fulfilled') {
+        sections.push(results[j].value)
+      } else {
+        console.error(`[pack] section "${batch[j].title}" FAILED:`, results[j].reason?.message)
+        sections.push(makeFallbackSection(batch[j]))
+      }
     }
+
+    console.log(`[pack] generated ${sections.length}/${sectionOutlines.length} sections`)
   }
 
-  console.log(`[pack] all ${sections.length} sections generated`)
-
-  // Step 3b: Quiz validation (same as before — fill missing quiz questions)
-  const filledSections = await validateAndFillQuiz(sections, language)
-
-  // Step 4: Validate structure
-  const { sections: validatedSections, log } = validateSections(filledSections, sectionRange, totalChars)
+  // Validation (logging only, no extra AI calls)
+  const log = validateSections(sections, range)
   for (const msg of log) console.log(`[pack] ${msg}`)
 
-  return { sections: validatedSections }
+  return { sections }
 }
 
-// ─── Quiz validation (kept from original) ────────────────────────────────────
-
-const MIN_QUIZ_PER_SECTION = 5
-const REQUIRED_QUIZ_TYPES = ['concept', 'application', 'comparison', 'error_detection']
-const MIN_DISTINCT_TYPES = 3
-
-async function generateExtraQuiz(section, needed, language, targetTypes = []) {
-  const existingQuestions = (section.quiz || [])
-    .map((q, i) => `${i + 1}. [${q.questionType || 'unknown'}] ${q.question}`)
-    .join('\n')
-
-  const context = [
-    `Section title: "${section.title}"`,
-    section.notes?.length ? `Notes:\n${section.notes.map(n => `- ${n}`).join('\n')}` : '',
-    section.keyConcepts?.length
-      ? `Key concepts: ${section.keyConcepts.map(c => `${c.term}: ${c.definition}`).join(' | ')}`
-      : '',
-  ].filter(Boolean).join('\n\n')
-
-  const typeInstr = targetTypes.length > 0
-    ? `You MUST generate questions of these specific types (one per type listed): ${targetTypes.join(', ')}.`
-    : `Cover different types not already present: application, comparison, error_detection, or reasoning.`
-
-  const response = await client.chat.completions.create({
-    model: 'gpt-4o',
-    messages: [{
-      role: 'user',
-      content: `Generate exactly ${needed} NEW multiple-choice quiz question(s) for this section.
-
-${context}
-
-ALREADY GENERATED (do NOT repeat or rephrase these):
-${existingQuestions || '(none)'}
-
-TYPE REQUIREMENT:
-${typeInstr}
-
-questionType options: concept | application | comparison | error_detection | reasoning
-For each question:
-- Set "questionType" to the appropriate type
-- Write a short "explanation" (1–2 sentences) of why the correct answer is right
-- 4 distinct plausible options (A–D)
-- Correct answer is the letter only (e.g. "B")
-- Output language: ${language}
-
-Respond ONLY with valid JSON:
-{"quiz": [{"question": "string", "options": ["A. string","B. string","C. string","D. string"], "answer": "string", "explanation": "string", "questionType": "string"}]}`,
-    }],
-    response_format: { type: 'json_object' },
-    temperature: 0.5,
-  })
-
-  const result = JSON.parse(response.choices[0].message.content)
-  return Array.isArray(result.quiz) ? result.quiz : []
-}
-
-function getMissingTypes(quiz) {
-  const present = new Set((quiz || []).map(q => q.questionType).filter(Boolean))
-  return REQUIRED_QUIZ_TYPES.filter(t => !present.has(t))
-}
-
-function dedupeQuiz(existing, incoming) {
-  const seen = new Set(existing.map(q => q.question.toLowerCase().trim()))
-  return incoming.filter(q => q.question && !seen.has(q.question.toLowerCase().trim()))
-}
-
-async function validateAndFillQuiz(sections, language) {
-  const filled = [...sections]
-
-  for (let i = 0; i < filled.length; i++) {
-    const s = filled[i]
-
-    // Pass A: quantity check
-    const current = s.quiz?.length || 0
-    if (current < MIN_QUIZ_PER_SECTION) {
-      const needed = MIN_QUIZ_PER_SECTION - current
-      const missingTypes = getMissingTypes(s.quiz).slice(0, needed)
-      console.log(`[quiz] section ${i + 1} "${s.title}": has ${current}, generating ${needed} more`)
-
-      try {
-        const extra = await generateExtraQuiz(s, needed, language, missingTypes)
-        const fresh = dedupeQuiz(s.quiz || [], extra)
-        filled[i] = { ...s, quiz: [...(s.quiz || []), ...fresh] }
-      } catch (err) {
-        console.warn(`[quiz] fill failed for section ${i + 1}:`, err.message)
-      }
-    }
-
-    // Pass B: diversity check
-    const afterA = filled[i]
-    const presentTypes = new Set((afterA.quiz || []).map(q => q.questionType).filter(Boolean))
-    const missingTypes = getMissingTypes(afterA.quiz)
-
-    if (presentTypes.size < MIN_DISTINCT_TYPES && missingTypes.length > 0) {
-      const needed = Math.min(missingTypes.length, 2)
-      try {
-        const extra = await generateExtraQuiz(afterA, needed, language, missingTypes.slice(0, needed))
-        const fresh = dedupeQuiz(afterA.quiz || [], extra)
-        filled[i] = { ...afterA, quiz: [...(afterA.quiz || []), ...fresh] }
-      } catch (err) {
-        console.warn(`[quiz] diversity fill failed for section ${i + 1}:`, err.message)
-      }
-    }
-  }
-
-  return filled
-}
-
-// ─── Answer evaluation ──────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// ANSWER EVALUATION (unchanged, but with safe parsing)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 export async function evaluateAnswer({ question, practiceType, expectedAnswer, lessonContext, studentAnswer, language = 'English' }) {
   const systemPrompt = `You are an expert learning coach evaluating a student's answer.
-
-Output language: ${language}. Write all feedback in this language.
-
-Evaluate semantically — accept answers that are conceptually correct even if phrased differently.
-Distinguish between correct, partial, and incorrect.
+Output language: ${language}.
+Evaluate semantically. Distinguish correct/partial/incorrect.
 Be supportive and concise. Prefer hints over full solutions.
-
-If the student answer is empty or too vague:
-- mark as incorrect
-- explain what kind of answer is needed
-- provide a small hint, not the full solution
-
 Respond ONLY with valid JSON:
-{
-  "grade": "correct" | "partial" | "incorrect",
-  "score": 0-100,
-  "strengths": ["string"],
-  "missing": ["string"],
-  "misconceptions": ["string"],
-  "hint": "string",
-  "ideal_answer": "string",
-  "should_retry": true | false,
-  "mastered": true | false,
-  "follow_up_question": "string or null",
-  "flashcard": { "front": "string", "back": "string" } | null
-}`
+{"grade":"correct|partial|incorrect","score":0,"strengths":[],"missing":[],"misconceptions":[],"hint":"","ideal_answer":"","should_retry":false,"mastered":false,"follow_up_question":null,"flashcard":null}`
 
   const parts = [
     `Question: ${question}`,
     `Practice type: ${practiceType}`,
-    `Expected concept/reference: ${expectedAnswer}`,
+    `Expected: ${expectedAnswer}`,
   ]
-  if (lessonContext) parts.push(`Lesson context: ${lessonContext}`)
-  parts.push(`Student answer: ${studentAnswer || '(no answer provided)'}`)
+  if (lessonContext) parts.push(`Context: ${lessonContext}`)
+  parts.push(`Student answer: ${studentAnswer || '(empty)'}`)
 
   const response = await client.chat.completions.create({
     model: 'gpt-4o',
@@ -707,48 +500,43 @@ Respond ONLY with valid JSON:
     temperature: 0.2,
   })
 
-  return JSON.parse(response.choices[0].message.content)
+  const parsed = safeParseJSON(response.choices[0].message.content, 'evaluateAnswer')
+  if (!parsed.ok) throw new Error('Failed to parse evaluation response')
+  return parsed.data
 }
 
-// ─── Transcript classification ──────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRANSCRIPT CLASSIFICATION
+// ═══════════════════════════════════════════════════════════════════════════════
 
 export async function classifyTranscript(transcript) {
   const response = await client.chat.completions.create({
     model: 'gpt-4o',
-    messages: [
-      {
-        role: 'user',
-        content: `You are classifying an educational YouTube transcript.
-
-Return the dominant learning type:
-- conceptual: theory, explanation, history, psychology, business, non-procedural learning
-- coding: programming, SQL, Excel formulas, scripting, technical implementation
-- math: solving numeric/symbolic problems, equations, fractions, algebra, calculus, statistics, physics calculations
-
-Rules:
-- Pick ONE type that best describes the majority of the content
-- coding = writing/reading/understanding code or queries
-- math = solving numeric problems with formulas and calculations
-- conceptual = everything else (ideas, concepts, soft skills, explanations)
+    messages: [{
+      role: 'user',
+      content: `Classify this educational transcript. Return the dominant type:
+- conceptual: theory, explanations, history, business
+- coding: programming, SQL, scripting, technical implementation
+- math: equations, algebra, calculus, physics calculations
 
 Return ONLY valid JSON:
-{
-  "learningType": "conceptual",
-  "confidence": 8,
-  "reason": "..."
-}
+{"learningType":"conceptual","confidence":8,"reason":"..."}
 
 INPUT:
 ${transcript.slice(0, 4000)}`,
-      },
-    ],
+    }],
     response_format: { type: 'json_object' },
     temperature: 0.1,
   })
-  return JSON.parse(response.choices[0].message.content)
+
+  const parsed = safeParseJSON(response.choices[0].message.content, 'classifyTranscript')
+  if (!parsed.ok) return { learningType: 'conceptual', confidence: 0, reason: 'parse failed' }
+  return parsed.data
 }
 
-// ─── Exports ─────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXPORTS
+// ═══════════════════════════════════════════════════════════════════════════════
 
 export const DEPTHS = [
   { id: 'quick', label: 'Quick', desc: '3 quiz · 5 cards', maxMin: 20 },
@@ -772,29 +560,25 @@ export const MODES = [
   { id: 'decision-help', label: 'Decision Help' },
 ]
 
-// processTranscript: handles all modes.
-// For study-pack, delegates to the multi-step pipeline.
-// For other modes, uses the simple single-prompt approach.
-
 export async function processTranscript(transcript, mode = 'action-steps', depth = 'standard', learningType = 'conceptual', language = 'English') {
-  // Study-pack mode uses the multi-step pipeline
   if (mode === 'study-pack') {
     return generateStudyPack(transcript, learningType, language)
   }
 
-  // All other modes use simple single-prompt
-  const languageInstruction = `\n\nOutput language: ${language}. Write ALL content in this language.`
-  const basePrompt = PROMPTS[mode] || PROMPTS['action-steps']
+  const langNote = `\n\nOutput language: ${language}.`
+  const prompt = PROMPTS[mode] || PROMPTS['action-steps']
 
   const response = await client.chat.completions.create({
     model: 'gpt-4o',
     messages: [
-      { role: 'system', content: basePrompt + languageInstruction },
+      { role: 'system', content: prompt + langNote },
       { role: 'user', content: `INPUT:\n${transcript}` },
     ],
     response_format: { type: 'json_object' },
     temperature: 0.3,
   })
 
-  return JSON.parse(response.choices[0].message.content)
+  const parsed = safeParseJSON(response.choices[0].message.content, `processTranscript(${mode})`)
+  if (!parsed.ok) throw new Error(`Failed to parse ${mode} response`)
+  return parsed.data
 }
