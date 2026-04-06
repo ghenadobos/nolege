@@ -1,9 +1,11 @@
 import OpenAI from 'openai'
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  timeout: 45_000,  // 45s per request — fail fast, don't hang until Vercel kills us
-})
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+
+// gpt-4o-mini for fast pipeline steps (labeling, section gen) — 5x faster than gpt-4o
+// gpt-4o only for answer evaluation where quality matters most
+const FAST_MODEL = 'gpt-4o-mini'
+const QUALITY_MODEL = 'gpt-4o'
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SAFE JSON PARSING — every AI response goes through this
@@ -162,7 +164,7 @@ async function labelChunks(chunks, language) {
   console.log(`[label] sending ${chunks.length} chunk previews (${previewLen} chars each)`)
 
   const response = await client.chat.completions.create({
-    model: 'gpt-4o',
+    model: FAST_MODEL,
     messages: [{
       role: 'user',
       content: `Label topics for a video transcript split into ${chunks.length} chunks.
@@ -301,7 +303,7 @@ function uniformSections(chunks, range) {
 // Runs in parallel batches of MAX_PARALLEL.
 // Errors are isolated — a failed section produces a minimal fallback.
 
-const MAX_PARALLEL = 8  // higher parallelism to finish faster within timeout
+const MAX_PARALLEL = 4  // conservative parallelism to avoid rate limits
 
 async function generateSectionContent(sectionOutline, chunkText, learningType, language, totalSections) {
   const practiceInstr = PRACTICE_INSTRUCTIONS[learningType] || PRACTICE_INSTRUCTIONS.conceptual
@@ -353,7 +355,7 @@ ${chunkText}`
   console.log(`[gen] section "${sectionOutline.title}" — ~${estTokens} input tokens`)
 
   const response = await client.chat.completions.create({
-    model: 'gpt-4o',
+    model: FAST_MODEL,
     messages: [{ role: 'user', content: prompt }],
     response_format: { type: 'json_object' },
     temperature: 0.3,
@@ -530,7 +532,7 @@ Respond ONLY with valid JSON:
   parts.push(`Student answer: ${studentAnswer || '(empty)'}`)
 
   const response = await client.chat.completions.create({
-    model: 'gpt-4o',
+    model: QUALITY_MODEL,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: parts.join('\n') },
@@ -550,7 +552,7 @@ Respond ONLY with valid JSON:
 
 export async function classifyTranscript(transcript) {
   const response = await client.chat.completions.create({
-    model: 'gpt-4o',
+    model: FAST_MODEL,
     messages: [{
       role: 'user',
       content: `Classify this educational transcript. Return the dominant type:
@@ -608,7 +610,7 @@ export async function processTranscript(transcript, mode = 'action-steps', depth
   const prompt = PROMPTS[mode] || PROMPTS['action-steps']
 
   const response = await client.chat.completions.create({
-    model: 'gpt-4o',
+    model: FAST_MODEL,
     messages: [
       { role: 'system', content: prompt + langNote },
       { role: 'user', content: `INPUT:\n${transcript}` },
