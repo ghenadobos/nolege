@@ -178,6 +178,8 @@ export default function Home() {
   const [savedPacks, setSavedPacks]         = useState([])
   const [saved, setSaved]                   = useState(false)
   const [copyState, setCopyState]           = useState(null)
+  const [showPaste, setShowPaste]           = useState(false)
+  const [manualTranscript, setManualTranscript] = useState('')
   const debounceRef                         = useRef(null)
 
   const T = translations[lang] || translations.en
@@ -303,9 +305,10 @@ export default function Home() {
     setError(null)
     setResult(null)
     setTranscriptSource(null)
+    setShowPaste(false)
     setLoading(true)
     try {
-      // Step 1: Fetch transcript via Edge Runtime (bypasses datacenter IP blocks)
+      // Step 1: Fetch transcript via Edge Runtime
       let transcript = null
       let transcriptSource = null
       try {
@@ -334,13 +337,55 @@ export default function Home() {
       try { data = JSON.parse(text) } catch {
         setError(`Server returned unexpected response: ${text.slice(0, 200)}`); return
       }
-      if (!res.ok) { setError(data.error || 'Something went wrong.') }
-      else {
+      if (!res.ok) {
+        const errMsg = data.error || 'Something went wrong.'
+        setError(errMsg)
+        if (errMsg.toLowerCase().includes('no transcript') || errMsg.toLowerCase().includes('no captions') || errMsg.toLowerCase().includes('transcript available')) {
+          setShowPaste(true)
+        }
+      } else {
         setResult(data)
         setTranscriptSource(data.transcriptSource || null)
         setActiveUrl(url)
         setSaved(false)
         trackEvent('study_pack_generated', { language: lang })
+      }
+    } catch (err) {
+      setError(`Request failed: ${err?.message || 'unknown error'}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  async function handlePasteSubmit() {
+    if (!manualTranscript.trim() || manualTranscript.trim().length < 50) return
+    setError(null)
+    setResult(null)
+    setShowPaste(false)
+    setLoading(true)
+    try {
+      const res = await fetch('/api/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          url, mode: 'study-pack', depth: 'full', language: lang,
+          transcript: manualTranscript.trim(),
+          transcriptSource: 'manual',
+        }),
+      })
+      const text = await res.text()
+      let data
+      try { data = JSON.parse(text) } catch {
+        setError(`Server returned unexpected response: ${text.slice(0, 200)}`); return
+      }
+      if (!res.ok) { setError(data.error || 'Something went wrong.') }
+      else {
+        setResult(data)
+        setTranscriptSource('manual')
+        setActiveUrl(url)
+        setSaved(false)
+        setManualTranscript('')
+        trackEvent('study_pack_generated', { language: lang, source: 'manual_paste' })
       }
     } catch (err) {
       setError(`Request failed: ${err?.message || 'unknown error'}`)
@@ -409,6 +454,29 @@ export default function Home() {
             <div className="bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 rounded-xl px-4 py-3.5 text-sm mb-8">
               <p className="font-semibold mb-0.5">{T.errTitle}</p>
               <p className="text-red-500 dark:text-red-500">{friendlyError(error, T)}</p>
+            </div>
+          )}
+
+          {/* ── Manual paste fallback ── */}
+          {showPaste && !loading && !result && (
+            <div className="bg-amber-50 dark:bg-amber-950 border border-amber-200 dark:border-amber-800 rounded-xl px-5 py-4 mb-8">
+              <p className="text-sm font-semibold text-amber-800 dark:text-amber-300 mb-1">{T.pastePrompt}</p>
+              <p className="text-xs text-amber-600 dark:text-amber-400 mb-3 leading-relaxed">{T.pasteInstructions}</p>
+              <textarea
+                value={manualTranscript}
+                onChange={(e) => setManualTranscript(e.target.value)}
+                placeholder={T.pasteTextarea}
+                rows={6}
+                className="w-full bg-white dark:bg-neutral-900 border border-amber-300 dark:border-amber-700 rounded-lg px-3 py-2.5 text-sm text-neutral-900 dark:text-neutral-100 placeholder-neutral-400 dark:placeholder-neutral-600 focus:outline-none focus:border-amber-500 dark:focus:border-amber-500 transition resize-y mb-3"
+              />
+              <button
+                type="button"
+                onClick={handlePasteSubmit}
+                disabled={loading || !manualTranscript.trim() || manualTranscript.trim().length < 50}
+                className="w-full bg-amber-700 dark:bg-amber-600 hover:bg-amber-800 dark:hover:bg-amber-500 disabled:bg-neutral-200 dark:disabled:bg-neutral-800 disabled:text-neutral-400 dark:disabled:text-neutral-600 text-white text-sm font-semibold py-3 rounded-xl transition"
+              >
+                {T.pasteSubmit}
+              </button>
             </div>
           )}
 
