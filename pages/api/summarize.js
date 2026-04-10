@@ -76,17 +76,9 @@ export default async function handler(req, res) {
 
     console.log(`[summarize] mode=${mode} depth=${depth} lang=${language} transcript=${transcript.length} chars, source=${transcriptSource}`)
 
-    // Classify content type for study-pack (fast call on first 4k chars)
-    let learningType = 'conceptual'
-    if (mode === 'study-pack') {
-      try {
-        const classification = await classifyTranscript(processedTranscript)
-        learningType = classification.learningType || 'conceptual'
-        console.log(`[classify] ${learningType} (confidence: ${classification.confidence}) — ${classification.reason}`)
-      } catch (err) {
-        console.warn('Classification failed, defaulting to conceptual:', err?.message)
-      }
-    }
+    // Skip classification to save 1 API call — default to conceptual
+    // (saves ~3s of the 60s Vercel timeout budget)
+    const learningType = 'conceptual'
 
     let result
     try {

@@ -303,9 +303,8 @@ function uniformSections(chunks, range) {
 // Runs in parallel batches of MAX_PARALLEL.
 // Errors are isolated — a failed section produces a minimal fallback.
 
-const SECTIONS_PER_CALL = 3   // sections generated per single API call
-const MAX_PARALLEL_CALLS = 2  // keep low — free-tier gpt-4o-mini allows only 3 RPM
-const MAX_SECTIONS = 12       // hard cap for Vercel 60s timeout
+const MAX_PARALLEL = 2   // parallel section calls — low to avoid rate limits
+const MAX_SECTIONS = 8   // hard cap for Vercel 60s timeout
 
 async function generateSectionContent(sectionOutline, chunkText, learningType, language, totalSections) {
   const practiceInstr = PRACTICE_INSTRUCTIONS[learningType] || PRACTICE_INSTRUCTIONS.conceptual
@@ -396,8 +395,26 @@ function makeFallbackSection(outline) {
   }
 }
 
-// ─── Batch content generation ───────────────────────────────────────────────
-// Multiple sections per API call — reduces total calls from N to ceil(N/3).
+// ─── Section generation with retry ─────────────────────────────────────────
+
+async function generateSectionWithRetry(outline, text, learningType, language, totalSections) {
+  try {
+    return await generateSectionContent(outline, text, learningType, language, totalSections)
+  } catch (err) {
+    const status = err?.status || err?.response?.status || 'unknown'
+    console.warn(`[gen] "${outline.title}" failed (status=${status}): ${err.message}`)
+    const delay = status === 429 ? 5000 : 2000
+    await new Promise(r => setTimeout(r, delay))
+    try {
+      return await generateSectionContent(outline, text, learningType, language, totalSections)
+    } catch (retryErr) {
+      console.error(`[gen] retry failed "${outline.title}": ${retryErr.message}`)
+      return makeFallbackSection(outline)
+    }
+  }
+}
+
+// ─── Batch content generation (unused — kept for reference) ────────────────
 // E.g., 12 sections → 4 API calls instead of 12. All fit in 1 parallel wave.
 
 async function generateBatchContent(sectionGroup, chunks, learningType, language, totalSections) {
@@ -536,7 +553,7 @@ function validateSections(sections, range) {
 
 async function generateStudyPack(transcript, learningType, language) {
   const totalChars = transcript.length
-  console.log(`[pack] v2 START — ${totalChars} chars, learningType=${learningType}, language=${language}`)
+  console.log(`[pack] v3 START — ${totalChars} chars, type=${learningType}, lang=${language}`)
 
   // Step 1: Deterministic chunking
   const chunks = chunkTranscript(transcript)
@@ -587,37 +604,36 @@ async function generateStudyPack(transcript, learningType, language) {
 
   console.log(`[pack] step 3: ${sectionOutlines.length} sections planned`)
 
-  // Step 4: Batch content generation (multiple sections per API call)
-  // Groups of 3 sections per call → e.g., 12 sections = 4 API calls, all parallel
-  const sectionGroups = []
-  for (let i = 0; i < sectionOutlines.length; i += SECTIONS_PER_CALL) {
-    sectionGroups.push(sectionOutlines.slice(i, i + SECTIONS_PER_CALL))
-  }
-  console.log(`[pack] step 4: ${sectionGroups.length} API calls for ${sectionOutlines.length} sections (${SECTIONS_PER_CALL}/call, ${MAX_PARALLEL_CALLS} parallel)`)
+  // Step 4: Generate content per section (1 section per API call, 2 parallel)
+  console.log(`[pack] step 4: generating ${sectionOutlines.length} sections (${MAX_PARALLEL} parallel)`)
 
   const sections = []
-  for (let wave = 0; wave < sectionGroups.length; wave += MAX_PARALLEL_CALLS) {
-    const parallelBatch = sectionGroups.slice(wave, wave + MAX_PARALLEL_CALLS)
+  for (let i = 0; i < sectionOutlines.length; i += MAX_PARALLEL) {
+    const batch = sectionOutlines.slice(i, i + MAX_PARALLEL)
 
     const results = await Promise.allSettled(
-      parallelBatch.map(group =>
-        generateBatchWithRetry(group, chunks, learningType, language, sectionOutlines.length)
-      )
+      batch.map(outline => {
+        const text = outline.chunkIndices
+          .map(idx => chunks[idx]?.text || '')
+          .filter(Boolean)
+          .join('\n')
+        return generateSectionWithRetry(outline, text, learningType, language, sectionOutlines.length)
+      })
     )
 
     for (let j = 0; j < results.length; j++) {
       if (results[j].status === 'fulfilled') {
-        sections.push(...results[j].value)
+        sections.push(results[j].value)
       } else {
-        console.error(`[pack] batch ${wave + j} FAILED:`, results[j].reason?.message)
-        sections.push(...parallelBatch[j].map(o => makeFallbackSection(o)))
+        console.error(`[pack] section "${batch[j].title}" FAILED:`, results[j].reason?.message)
+        sections.push(makeFallbackSection(batch[j]))
       }
     }
 
     console.log(`[pack] progress: ${sections.length}/${sectionOutlines.length} sections`)
 
     // Delay between waves to avoid rate limits
-    if (wave + MAX_PARALLEL_CALLS < sectionGroups.length) {
+    if (i + MAX_PARALLEL < sectionOutlines.length) {
       await new Promise(r => setTimeout(r, 1500))
     }
   }
