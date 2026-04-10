@@ -308,7 +308,7 @@ async function generateExtraQuiz(section, needed, language, targetTypes = []) {
     : `Cover different types not already present: application, comparison, error_detection, or reasoning.`
 
   const response = await client.chat.completions.create({
-    model: 'gpt-4o',
+    model: 'gpt-4o-mini',
     messages: [{
       role: 'user',
       content: `Generate exactly ${needed} NEW multiple-choice quiz question(s) for this section.
@@ -342,8 +342,10 @@ Respond ONLY with valid JSON:
     temperature: 0.5,
   })
 
-  const result = JSON.parse(response.choices[0].message.content)
-  return Array.isArray(result.quiz) ? result.quiz : []
+  try {
+    const result = JSON.parse(response.choices[0].message.content)
+    return Array.isArray(result.quiz) ? result.quiz : []
+  } catch { return [] }
 }
 
 // Types that every section should cover at least once
@@ -451,7 +453,7 @@ Respond ONLY with valid JSON:
   parts.push(`Student answer: ${studentAnswer || '(no answer provided)'}`)
 
   const response = await client.chat.completions.create({
-    model: 'gpt-4o',
+    model: 'gpt-4o-mini',
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: parts.join('\n') },
@@ -489,7 +491,7 @@ export const MODES = [
 
 export async function classifyTranscript(transcript) {
   const response = await client.chat.completions.create({
-    model: 'gpt-4o',
+    model: 'gpt-4o-mini',
     messages: [
       {
         role: 'user',
@@ -533,7 +535,7 @@ export async function processTranscript(transcript, mode = 'action-steps', depth
   const systemPrompt = basePrompt + languageInstruction
 
   const response = await client.chat.completions.create({
-    model: 'gpt-4o',
+    model: 'gpt-4o-mini',
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: `INPUT:\n${transcript}` },
@@ -543,11 +545,21 @@ export async function processTranscript(transcript, mode = 'action-steps', depth
   })
 
   const raw = response.choices[0].message.content
-  const data = JSON.parse(raw)
+  let data
+  try {
+    data = JSON.parse(raw)
+  } catch (err) {
+    console.error('[openai] JSON parse failed:', err.message, 'raw:', (raw || '').slice(0, 300))
+    throw new Error('AI returned invalid response')
+  }
 
-  // Validate and fill quiz for study-pack mode — second pass for any section below minimum
+  // Validate and fill quiz for study-pack mode — second pass (skip if time is tight)
   if (mode === 'study-pack' && Array.isArray(data.sections)) {
-    data.sections = await validateAndFillQuiz(data.sections, language)
+    try {
+      data.sections = await validateAndFillQuiz(data.sections, language)
+    } catch (err) {
+      console.warn('[quiz-fill] skipped:', err.message)
+    }
   }
 
   return data
