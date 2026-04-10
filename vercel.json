@@ -1,3 +1,11 @@
 {
-  "framework": "nextjs"
+  "framework": "nextjs",
+  "functions": {
+    "pages/api/summarize.js": {
+      "maxDuration": 60
+    },
+    "pages/api/evaluate.js": {
+      "maxDuration": 30
+    }
+  }
 }

@@ -2,6 +2,11 @@ import { extractVideoId, getTranscriptWithFallback } from '../../utils/transcrip
 import { processTranscript, classifyTranscript, MODES } from '../../utils/openai'
 import { enhancePackWithVisuals } from '../../utils/visualAnalysis'
 
+// Vercel Hobby defaults to 10s — OpenAI needs much more
+export const config = {
+  maxDuration: 60,
+}
+
 const VALID_MODES = MODES.map((m) => m.id)
 
 function sampleTranscript(transcript, maxChars) {
