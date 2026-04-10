@@ -303,7 +303,7 @@ function uniformSections(chunks, range) {
 // Runs in parallel batches of MAX_PARALLEL.
 // Errors are isolated — a failed section produces a minimal fallback.
 
-const MAX_PARALLEL = 4  // conservative parallelism to avoid rate limits
+const MAX_PARALLEL = 2  // low to stay within 60s Vercel timeout + rate limits
 
 async function generateSectionContent(sectionOutline, chunkText, learningType, language, totalSections) {
   const practiceInstr = PRACTICE_INSTRUCTIONS[learningType] || PRACTICE_INSTRUCTIONS.conceptual
@@ -455,8 +455,8 @@ async function generateStudyPack(transcript, learningType, language) {
     sectionOutlines = uniformSections(chunks, range)
   }
 
-  // Cap sections to avoid timeout — max 3 parallel batches of 8 = 24 sections
-  const MAX_SECTIONS = 24
+  // Cap sections — 8 max fits in 60s timeout (4 waves × 2 parallel × ~8s each)
+  const MAX_SECTIONS = 8
   if (sectionOutlines.length > MAX_SECTIONS) {
     console.warn(`[pack] capping ${sectionOutlines.length} sections to ${MAX_SECTIONS} to stay within timeout`)
     // Merge smallest adjacent pairs until we're within limit
