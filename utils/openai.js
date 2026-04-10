@@ -553,14 +553,10 @@ export async function processTranscript(transcript, mode = 'action-steps', depth
     throw new Error('AI returned invalid response')
   }
 
-  // Validate and fill quiz for study-pack mode — second pass (skip if time is tight)
-  if (mode === 'study-pack' && Array.isArray(data.sections)) {
-    try {
-      data.sections = await validateAndFillQuiz(data.sections, language)
-    } catch (err) {
-      console.warn('[quiz-fill] skipped:', err.message)
-    }
-  }
+  // Quiz fill pass disabled — too many API calls for Vercel 60s limit
+  // if (mode === 'study-pack' && Array.isArray(data.sections)) {
+  //   data.sections = await validateAndFillQuiz(data.sections, language)
+  // }
 
   return data
 }

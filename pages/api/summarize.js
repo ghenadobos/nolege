@@ -65,38 +65,21 @@ export default async function handler(req, res) {
     const charLimits = { quick: 20000, standard: 50000, full: 100000 }
     const trimmed = sampleTranscript(transcript, charLimits[depth] || 50000)
 
-    // Classify content type for study-pack (fast call on first 4k chars)
-    let learningType = 'conceptual'
-    if (mode === 'study-pack') {
-      try {
-        const classification = await classifyTranscript(trimmed)
-        learningType = classification.learningType || 'conceptual'
-        console.log(`[classify] ${learningType} (confidence: ${classification.confidence}) — ${classification.reason}`)
-      } catch (err) {
-        console.warn('Classification failed, defaulting to conceptual:', err?.message)
-      }
-    }
+    // Skip classification — saves 1 API call for the 60s budget
+    const learningType = 'conceptual'
 
+    console.log(`[summarize] calling processTranscript: mode=${mode} depth=${depth} chars=${trimmed.length}`)
     let result
     try {
       result = await processTranscript(trimmed, mode, depth, learningType, languageName)
+      console.log(`[summarize] processTranscript returned OK`)
     } catch (err) {
-      console.error('OpenAI error:', err?.message)
+      console.error('OpenAI error:', err?.message, err?.status, err?.code)
       return res.status(500).json({ error: `AI processing failed: ${err?.message || 'unknown error'}` })
     }
 
-    // Visual enhancement — only for study-pack, non-fatal if it fails
-    if (mode === 'study-pack' && result.sections?.length) {
-      try {
-        const visualResult = await enhancePackWithVisuals(videoId, result.sections)
-        result = { ...result, ...visualResult }
-        if (visualResult.visuallyEnhanced) {
-          console.log('[visual] pack enhanced with visual analysis')
-        }
-      } catch (err) {
-        console.warn('[visual] enhancement skipped:', err?.message)
-      }
-    }
+    // Visual enhancement disabled — saves time for 60s budget
+    // if (mode === 'study-pack' && result.sections?.length) { ... }
 
     return res.status(200).json({ mode, learningType, transcriptSource, contentLanguage: language, ...result })
   } catch (err) {
