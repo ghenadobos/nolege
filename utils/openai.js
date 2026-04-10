@@ -306,57 +306,32 @@ function uniformSections(chunks, range) {
 const MAX_PARALLEL = 2  // low to stay within 60s Vercel timeout + rate limits
 
 async function generateSectionContent(sectionOutline, chunkText, learningType, language, totalSections) {
-  const practiceInstr = PRACTICE_INSTRUCTIONS[learningType] || PRACTICE_INSTRUCTIONS.conceptual
+  const systemPrompt = `You are an educational content generator that creates study materials from video transcripts.
 
-  // Scale content per section based on total count
-  let notes, concepts, quiz, cards, practice
-  if (totalSections <= 4) {
-    notes = '8–12'; concepts = '4–6'; quiz = '6–8'; cards = '6–10'; practice = '2–3'
-  } else if (totalSections <= 10) {
-    notes = '5–8'; concepts = '3–5'; quiz = '5–7'; cards = '4–7'; practice = '1–2'
-  } else if (totalSections <= 20) {
-    notes = '4–6'; concepts = '2–4'; quiz = '5–6'; cards = '3–5'; practice = '1'
-  } else {
-    notes = '3–5'; concepts = '2–3'; quiz = '5'; cards = '3–4'; practice = '1'
-  }
+CRITICAL RULES:
+- NEVER return empty arrays. Every section MUST have content.
+- You MUST generate at least 3 notes, 5 quiz questions, and 5 flashcards.
+- Make questions specific, answerable, and fact-based from the source content.
+- Avoid duplicate questions.
+- If content is short, still generate the best possible output.
+- Output language: ${language}`
 
-  const prompt = `Generate study content for this section of a video study pack.
-
-SECTION TITLE: "${sectionOutline.title}"
-
-REQUIREMENTS:
-- notes: ${notes} bullet points (key ideas, learning-focused)
-- keyConcepts: ${concepts} terms with definitions
-- quiz: ${quiz} multiple-choice questions (MINIMUM 5)
-- flashcards: ${cards} Q&A pairs
-- practice: ${practice} exercises
-
-QUIZ TYPES (use all 5 if possible, at least 3 different):
-concept | application | comparison | error_detection | reasoning
-Each question needs: questionType, explanation, 4 options (A-D), answer (letter).
-
-${practiceInstr}
-
-Output language: ${language}
-
-Respond ONLY with valid JSON:
-{
-  "notes":["string"],
-  "keyConcepts":[{"term":"string","definition":"string"}],
-  "quiz":[{"question":"string","options":["A. str","B. str","C. str","D. str"],"answer":"string","explanation":"string","questionType":"string"}],
-  "flashcards":[{"question":"string","answer":"string"}],
-  "practice":[{"type":"string","prompt":"string","code":"string","options":["string"],"answer":"string","explanation":"string","referenceAnswer":"string","evaluationRubric":["string"]}]
-}
+  const prompt = `Create study materials for this section: "${sectionOutline.title}"
 
 TRANSCRIPT:
-${chunkText}`
+${chunkText}
 
-  const estTokens = Math.round(prompt.length / 4)
-  console.log(`[gen] section "${sectionOutline.title}" — ~${estTokens} input tokens`)
+Return ONLY valid JSON with these fields:
+{"notes":["string"],"quiz":[{"question":"string","options":["A. ...","B. ...","C. ...","D. ..."],"answer":"A","explanation":"string"}],"flashcards":[{"question":"string","answer":"string"}]}`
+
+  console.log(`[gen] section "${sectionOutline.title}" — ~${Math.round(prompt.length / 4)} input tokens`)
 
   const response = await client.chat.completions.create({
     model: FAST_MODEL,
-    messages: [{ role: 'user', content: prompt }],
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: prompt },
+    ],
     response_format: { type: 'json_object' },
     temperature: 0.3,
   })
@@ -365,20 +340,30 @@ ${chunkText}`
   const parsed = safeParseJSON(raw, `section "${sectionOutline.title}"`)
 
   if (!parsed.ok) {
-    console.error(`[gen] FAILED to parse section "${sectionOutline.title}" — returning minimal fallback`)
+    console.error(`[gen] FAILED to parse section "${sectionOutline.title}"`)
+    console.error(`[gen] raw response: ${(raw || '').slice(0, 500)}`)
     return makeFallbackSection(sectionOutline)
   }
 
-  const section = parsed.data
-  // Ensure required fields exist with correct types
+  const s = parsed.data
+  const notes = Array.isArray(s.notes) ? s.notes : []
+  const quiz = Array.isArray(s.quiz) ? s.quiz : []
+  const flashcards = Array.isArray(s.flashcards) ? s.flashcards : []
+
+  // Log warning if content is suspiciously empty
+  if (notes.length === 0 && quiz.length === 0) {
+    console.warn(`[gen] section "${sectionOutline.title}" returned empty — keys: ${Object.keys(s).join(', ')}`)
+    console.warn(`[gen] raw preview: ${raw.slice(0, 300)}`)
+  }
+
   return {
     title: sectionOutline.title,
-    startTime: sectionOutline.startTime || section.startTime || null,
-    notes: Array.isArray(section.notes) ? section.notes : [],
-    keyConcepts: Array.isArray(section.keyConcepts) ? section.keyConcepts : [],
-    quiz: Array.isArray(section.quiz) ? section.quiz : [],
-    flashcards: Array.isArray(section.flashcards) ? section.flashcards : [],
-    practice: Array.isArray(section.practice) ? section.practice : [],
+    startTime: sectionOutline.startTime || null,
+    notes,
+    keyConcepts: Array.isArray(s.keyConcepts) ? s.keyConcepts : [],
+    quiz,
+    flashcards,
+    practice: Array.isArray(s.practice) ? s.practice : [],
   }
 }
 
@@ -424,7 +409,7 @@ function validateSections(sections, range) {
 
 async function generateStudyPack(transcript, learningType, language) {
   const totalChars = transcript.length
-  console.log(`[pack] START — ${totalChars} chars, learningType=${learningType}, language=${language}`)
+  console.log(`[pack] v4 START — ${totalChars} chars, type=${learningType}, lang=${language}`)
 
   // Step 1: Deterministic chunking
   const chunks = chunkTranscript(transcript)
@@ -455,8 +440,8 @@ async function generateStudyPack(transcript, learningType, language) {
     sectionOutlines = uniformSections(chunks, range)
   }
 
-  // Cap sections — 8 max fits in 60s timeout (4 waves × 2 parallel × ~8s each)
-  const MAX_SECTIONS = 8
+  // Cap sections — 6 sequential × ~5s each = ~30s + labeling 5s = 35s total
+  const MAX_SECTIONS = 6
   if (sectionOutlines.length > MAX_SECTIONS) {
     console.warn(`[pack] capping ${sectionOutlines.length} sections to ${MAX_SECTIONS} to stay within timeout`)
     // Merge smallest adjacent pairs until we're within limit
@@ -477,27 +462,29 @@ async function generateStudyPack(transcript, learningType, language) {
 
   console.log(`[pack] step 3: ${sectionOutlines.length} sections planned`)
 
-  // Step 4: Generate content per section (parallel batches, error-isolated)
+  // Step 4: Generate content SEQUENTIALLY — one section at a time
+  // Avoids all rate limit issues. 8 sections × ~5s = 40s — fits in 60s.
   const sections = []
-  for (let batchStart = 0; batchStart < sectionOutlines.length; batchStart += MAX_PARALLEL) {
-    const batch = sectionOutlines.slice(batchStart, batchStart + MAX_PARALLEL)
+  for (let i = 0; i < sectionOutlines.length; i++) {
+    const outline = sectionOutlines[i]
+    const text = outline.chunkIndices
+      .map(idx => chunks[idx]?.text || '')
+      .filter(Boolean)
+      .join('\n')
 
-    const results = await Promise.allSettled(
-      batch.map(outline => {
-        const text = outline.chunkIndices
-          .map(idx => chunks[idx]?.text || '')
-          .filter(Boolean)
-          .join('\n')
-        return generateSectionContent(outline, text, learningType, language, sectionOutlines.length)
-      })
-    )
-
-    for (let j = 0; j < results.length; j++) {
-      if (results[j].status === 'fulfilled') {
-        sections.push(results[j].value)
-      } else {
-        console.error(`[pack] section "${batch[j].title}" FAILED:`, results[j].reason?.message)
-        sections.push(makeFallbackSection(batch[j]))
+    try {
+      const section = await generateSectionContent(outline, text, learningType, language, sectionOutlines.length)
+      sections.push(section)
+    } catch (err) {
+      console.error(`[pack] section "${outline.title}" threw: ${err.message}`)
+      // Retry once after 2s
+      try {
+        await new Promise(r => setTimeout(r, 2000))
+        const section = await generateSectionContent(outline, text, learningType, language, sectionOutlines.length)
+        sections.push(section)
+      } catch (retryErr) {
+        console.error(`[pack] retry failed for "${outline.title}": ${retryErr.message}`)
+        sections.push(makeFallbackSection(outline))
       }
     }
 
